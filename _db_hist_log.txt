@@ -1,0 +1,7 @@
+[2026-08-19 09:16:04] add_scheduled_task_history called: sched_id=1, type=manual, task_id=078752c0-e16
+  CALLER:   File "C:\Users\Administrator\Desktop\geo-ops-system\.venv\Lib\site-packages\flask\app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+  File "C:\Users\Administrator\Desktop\geo-ops-system\geo-ops-system\backend\app.py", line 4610, in api_trigger_scheduled_task
+    hist_id = db.add_scheduled_task_history(
+
+  -> INSERT id=113 type=manual

@@ -1,0 +1,388 @@
+<template>
+  <div class="ai-write-page">
+    <!-- ===== 顶部操作栏 ===== -->
+    <div class="top-bar">
+      <div class="top-bar-left"></div>
+      <div class="top-bar-right">
+        <button class="tb-btn tb-outline" @click="showTaskDialog = true">
+          <el-icon><List /></el-icon>
+          生成任务
+          <el-badge v-if="runningTasks.length > 0" :value="runningTasks.length" class="task-badge" />
+        </button>
+        <button class="tb-btn tb-outline" @click="$message.info('文章查找功能开发中')">
+          <el-icon><Search /></el-icon>
+          搜文章找任务
+        </button>
+      </div>
+    </div>
+
+    <!-- ===== 主内容区 ===== -->
+    <div class="main-content">
+
+      <!-- ===== 一、目标客户（左侧大卡片）+ 生成依据（右侧小卡片）==== -->
+      <div class="row-two-col">
+        <!-- 目标客户 -->
+        <section class="aw-card aw-card-customer">
+          <div class="aw-card-header">
+            <div class="header-icon header-icon-blue">
+              <el-icon><User /></el-icon>
+            </div>
+            <div class="header-text">
+              <h3>目标客户</h3>
+              <p>选定后自动载入该客户知识库</p>
+            </div>
+          </div>
+          <div class="aw-card-body" @click="openCustomerDialog">
+            <div class="select-trigger" :class="{ 'has-value': selectedCustomer }">
+              <template v-if="selectedCustomer">
+                <div class="customer-info">
+                  <span class="cust-name">{{ selectedCustomer.companyName || selectedCustomer.name }}</span>
+                  <span v-if="selectedCustomer.brandName" class="cust-brand">品牌: {{ selectedCustomer.brandName }}</span>
+                  <span v-if="kbModules.length" class="cust-kb">知识库 v{{ kbVersion }} · {{ kbModules.length }} 个模块</span>
+                </div>
+                <el-icon class="arrow-icon"><ArrowDown /></el-icon>
+              </template>
+              <template v-else>
+                <span class="placeholder">点击选择客户</span>
+                <el-icon class="arrow-icon"><ArrowDown /></el-icon>
+              </template>
+            </div>
+          </div>
+
+          <!-- 知识库模块（选择客户后显示） -->
+          <div v-if="selectedCustomer && kbModules.length" class="kb-modules-section">
+            <div class="kb-modules-header">
+              <span class="kb-modules-title">引用知识库模块</span>
+              <button class="kb-select-all-btn" @click.stop="toggleAllKbModules">
+                {{ isAllKbSelected ? '取消全选' : '全选' }}
+              </button>
+            </div>
+            <div class="kb-modules-grid">
+              <label
+                v-for="mod in kbModules"
+                :key="mod.id"
+                class="kb-module-item"
+                :class="{ checked: selectedKbModuleIds.includes(mod.id) }"
+              >
+                <input type="checkbox" :checked="selectedKbModuleIds.includes(mod.id)" @change="toggleKbModule(mod.id)" />
+                <span class="module-name">{{ mod.name }}</span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- 生成依据 -->
+        <section class="aw-card aw-card-instruction">
+          <div class="aw-card-header">
+            <div class="header-icon header-icon-purple">
+              <el-icon><MagicStick /></el-icon>
+            </div>
+            <div class="header-text">
+              <h3>生成依据</h3>
+              <p>按行业内容类型蓝图生成</p>
+            </div>
+          </div>
+          <div class="aw-card-body instruction-body">
+            <div class="instruction-tabs">
+              <button
+                class="inst-tab"
+                :class="{ active: instTab === 'content' }"
+                @click="instTab = 'content'"
+              >内容类型</button>
+              <button
+                class="inst-tab"
+                :class="{ active: instTab === 'instruction' }"
+                @click="openInstructionDialog"
+              >指令库</button>
+            </div>
+            <div class="instruction-select-area" @click="openInstructionDialog">
+              <el-icon><Grid /></el-icon>
+              <span>{{ selectedInstruction ? selectedInstruction.title : '点击选择内容类型' }}</span>
+              <el-icon class="arrow-right"><ArrowRight /></el-icon>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ===== 二、提示词 ===== -->
+      <section class="aw-card aw-card-keywords">
+        <div class="aw-card-header">
+          <div class="header-icon header-icon-cyan">
+            <el-icon><Collection /></el-icon>
+          </div>
+          <div class="header-text">
+            <h3>提示词</h3>
+            <p>按上榜平台数分档挑选，或从客户词表中手动选</p>
+          </div>
+        </div>
+        <div class="aw-card-body keywords-body">
+          <!-- 未合并模式：显示已选提示词列表 -->
+          <template v-if="!keywordMergeMode">
+            <div v-if="selectedKeywords.length === 0" class="kw-empty" @click="openKeywordDialog">
+              <el-icon><Plus /></el-icon>
+              <span>点击选择提示词</span>
+              <el-icon class="arrow-right"><ArrowRight /></el-icon>
+            </div>
+            <div v-else class="kw-selected-list">
+              <div
+                v-for="kw in selectedKeywords"
+                :key="kw.id"
+                class="kw-selected-item"
+              >
+                <el-tag closable @close="removeKeyword(kw.id)" effect="plain">{{ kw.word }}</el-tag>
+                <div class="kw-count-input">
+                  <input
+                    type="number"
+                    :value="kw.count || 1"
+                    min="1"
+                    max="99"
+                    @change="updateKeywordCount(kw.id, $event.target.value)"
+                  />
+                  <span class="kw-count-label">篇</span>
+                </div>
+              </div>
+              <button class="kw-add-more" @click="openKeywordDialog">
+                <el-icon><Plus /></el-icon>
+              </button>
+            </div>
+          </template>
+
+          <!-- 合并模式 -->
+          <div v-else class="kw-merge-mode">
+            <div class="merge-info">
+              <span class="merge-text">已选 {{ selectedKeywords.length }} 个提示词，合并成 {{ mergeTotalCount }} 篇</span>
+              <span class="merge-hint">，每篇都覆盖全部</span>
+            </div>
+            <div class="merge-count-input">
+              <span class="merge-label">合成</span>
+              <input
+                type="number"
+                v-model.number="mergeTotalCount"
+                min="1"
+                max="999"
+              />
+              <span class="merge-label">篇</span>
+            </div>
+          </div>
+
+          <!-- 合并开关 -->
+          <div class="kw-actions-row">
+            <label class="merge-toggle">
+              <input type="checkbox" v-model="keywordMergeMode" />
+              <span>多个提示词合并生成</span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 三、重点补充 ===== -->
+      <section class="aw-card aw-card-supplement">
+        <div class="aw-card-header">
+          <div class="header-icon header-icon-red">
+            <el-icon><Star /></el-icon>
+          </div>
+          <div class="header-text">
+            <h3>重点补充 <el-tag size="small" type="danger" effect="light" round>最高优先级</el-tag></h3>
+            <p>本批每篇都会优先满足这里的要求（凌驾于类型蓝图与客户规则之上)</p>
+          </div>
+          <div class="word-count">{{ supplementText.length }} 字</div>
+        </div>
+        <div class="aw-card-body supplement-body">
+          <el-input
+            v-model="supplementText"
+            type="textarea"
+            :rows="5"
+            placeholder="例如:&#10;- 本批主打「以旧换新」补贴政策，每篇都要自然带到&#10;- 重点突出 2026 新款的静音技术"
+            class="supplement-textarea"
+          />
+        </div>
+      </section>
+
+      <!-- ===== 四、LLM 模型 ===== -->
+      <section class="aw-card aw-card-model">
+        <div class="aw-card-header">
+          <div class="header-icon header-icon-pink">
+            <el-icon><Cpu /></el-icon>
+          </div>
+          <div class="header-text">
+            <h3>LLM 模型</h3>
+            <p>字数由内容类型蓝图自动控制（800~1500 字）</p>
+          </div>
+        </div>
+        <div class="aw-card-body model-body">
+          <div class="model-tabs">
+            <button
+              v-for="m in modelOptions"
+              :key="m.value"
+              class="model-tab"
+              :class="{ active: selectedModel === m.value }"
+              @click="selectedModel = m.value"
+            >{{ m.label }}</button>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ===== 底部悬浮栏 ===== -->
+    <div class="bottom-bar">
+      <div class="bottom-bar-hint">{{ selectedCustomer ? '' : '请先选择客户' }}</div>
+      <div class="bottom-bar-actions">
+        <button class="btn-reset" @click="handleReset">
+          <el-icon><RefreshRight /></el-icon>
+          重置
+        </button>
+        <button class="btn-generate" :disabled="!canGenerate" @click="handleGenerate">
+          <el-icon><MagicStick /></el-icon>
+          生成 {{ totalArticleCount }} 篇次
+        </button>
+      </div>
+    </div>
+
+    <!-- ===== 弹窗：客户选择 ===== -->
+    <el-dialog
+      v-model="showCustomerDialog"
+      title="选择目标客户"
+      width="560px"
+      :close-on-click-modal="false"
+      class="customer-dialog"
+    >
+      <el-input
+        v-model="customerSearch"
+        placeholder="搜索客户名称、品牌.."
+        prefix-icon="Search"
+        clearable
+        class="customer-search"
+      />
+      <div class="customer-list">
+        <div
+          v-for="acc in filteredCustomers"
+          :key="acc.id"
+          class="customer-option"
+          :class="{ selected: selectedCustomerId === acc.id }"
+          @click="selectCustomer(acc)"
+        >
+          <div class="option-name">{{ acc.companyName || acc.name || '未命名客户' }}</div>
+          <div class="option-meta">
+            <span v-if="acc.brandName">品牌: {{ acc.brandName }}</span>
+            <span v-if="acc.email">{{ acc.email }}</span>
+          </div>
+        </div>
+        <div v-if="filteredCustomers.length === 0" class="no-data">无匹配客户</div>
+      </div>
+    </el-dialog>
+
+    <!-- ===== 弹窗：指令库选择 ===== -->
+    <el-dialog
+      v-model="showInstructionDialog"
+      title="选择写作指令"
+      width="600px"
+      :close-on-click-modal="false"
+      class="instruction-dialog"
+    >
+      <div class="inst-dialog-tabs">
+        <button
+          :class="{ active: instructionScope === 'mine' }"
+          @click="instructionScope = 'mine'"
+        >我的指令</button>
+        <button
+          :class="{ active: instructionScope === 'global' }"
+          @click="instructionScope = 'global'"
+        >全局指令</button>
+      </div>
+      <div class="inst-list">
+        <div
+          v-for="inst in filteredInstructions"
+          :key="inst.id"
+          class="inst-option"
+          :class="{ selected: selectedInstruction?.id === inst.id }"
+          @click="selectInstruction(inst)"
+        >
+          <div class="inst-title">{{ inst.title }}</div>
+          <div class="inst-desc">{{ inst.description || '暂无描述' }}</div>
+          <div class="inst-meta">
+            <el-tag v-if="inst.scope === 'global'" size="small" type="warning" effect="plain">全局</el-tag>
+            <span class="inst-vars" v-if="inst.variables?.length">
+              <el-icon><Document /></el-icon>
+              {{ inst.variables.length }} 个变量
+            </span>
+          </div>
+        </div>
+        <div v-if="filteredInstructions.length === 0" class="no-data">暂无指令</div>
+      </div>
+    </el-dialog>
+
+    <!-- ===== 弹窗：提示词/关键词选择 ===== -->
+    <el-dialog
+      v-model="showKeywordDialog"
+      title="选择提示词"
+      width="600px"
+      :close-on-click-modal="false"
+      class="keyword-dialog"
+    >
+      <div class="kw-dialog-toolbar">
+        <el-input
+          v-model="keywordSearchInput"
+          placeholder="搜索提示词.."
+          prefix-icon="Search"
+          clearable
+          class="kw-dialog-search"
+        />
+        <div class="kw-dialog-actions">
+          <button @click="selectAllKeywords">全选</button>
+          <button @click="clearAllKeywords">清空</button>
+        </div>
+      </div>
+      <div class="kw-dialog-list">
+        <label
+          v-for="kw in filteredKeywordList"
+          :key="kw.id"
+          class="kw-dialog-item"
+          :class="{ checked: isKeywordSelected(kw.id) }"
+        >
+          <input type="checkbox" :checked="isKeywordSelected(kw.id)" @change="toggleKeywordSelect(kw)" />
+          <span class="kw-word">{{ kw.word }}</span>
+          <el-tag v-if="kw.category" size="small" type="info" effect="plain">{{ kw.category }}</el-tag>
+        </label>
+        <div v-if="filteredKeywordList.length === 0" class="no-data">无匹配结果</div>
+      </div>
+    </el-dialog>
+
+    <!-- ===== 弹窗：生成任务列表 ===== -->
+    <el-dialog
+      v-model="showTaskDialog"
+      title="生成任务"
+      width="640px"
+      class="task-dialog"
+    >
+      <div class="task-list">
+        <div v-if="runningTasks.length === 0 && completedTasks.length === 0" class="no-data">
+          暂无生成任务
+        </div>
+        <div v-for="task in runningTasks" :key="task.id" class="task-item task-running">
+          <div class="task-status">
+            <el-icon class="is-loading"><Loading /></el-icon>
+            <span>生成中</span>
+          </div>
+          <div class="task-info">
+            <div class="task-title">{{ task.title }}</div>
+            <div class="task-progress">
+              <el-progress :percentage="task.progress" :stroke-width="6" />
+            </div>
+          </div>
+        </div>
+        <div v-for="task in completedTasks" :key="task.id" class="task-item task-completed">
+          <div class="task-status">
+            <el-icon><CircleCheck /></el-icon>
+            <span>已完成</span>
+          </div>
+          <div class="task-info">
+            <div class="task-title">{{ task.title }}</div>
+            <div class="task-time">{{ task.completedAt }}</div>
+          </div>
+        </div>
+      </div>
+    </el-dialog>
+  </div>
+</template>
+

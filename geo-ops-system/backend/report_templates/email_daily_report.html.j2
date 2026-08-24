@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GEO 系统日报 · {{ today }}</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6fb;font-family:-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif;color:#1f2937;line-height:1.6;font-size:14px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f3f6fb;padding:20px 0">
+<tr><td align="center">
+
+<table role="presentation" width="720" cellpadding="0" cellspacing="0" border="0" style="max-width:720px;width:100%;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 16px rgba(15,23,42,.06)">
+
+  <!-- Header -->
+  <tr><td style="background:linear-gradient(135deg,#1e3a8a 0%,#1e40af 100%);padding:24px 28px;color:#fff">
+    <div style="font-size:11px;letter-spacing:3px;color:rgba(255,255,255,.7);margin-bottom:4px;font-weight:600">MEDIA OPS · DAILY DIGEST</div>
+    <div style="font-size:22px;font-weight:700;letter-spacing:.5px;margin-bottom:4px">GEO 系统日报</div>
+    <div style="font-size:13px;color:rgba(255,255,255,.85)">{{ today }} · {{ today_weekday }} · 生成于 {{ generated_at }}</div>
+  </td></tr>
+
+  <!-- KPI 摘要卡片 -->
+  <tr><td style="padding:20px 28px 8px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td width="33%" style="padding:14px;background:#eff6ff;border-radius:8px;text-align:center;vertical-align:top">
+          <div style="font-size:11px;color:#1e40af;font-weight:600;letter-spacing:.5px;margin-bottom:4px">今日定时任务</div>
+          <div style="font-size:26px;font-weight:800;color:#1e40af;line-height:1.2">{{ today_due_count }}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:4px">总启用 {{ scheduled_total }} 个</div>
+        </td>
+        <td width="2"></td>
+        <td width="33%" style="padding:14px;background:{{ '#fef2f2' if yest_error_count > 0 else '#f0fdf4' }};border-radius:8px;text-align:center;vertical-align:top">
+          <div style="font-size:11px;color:{{ '#b91c1c' if yest_error_count > 0 else '#15803d' }};font-weight:600;letter-spacing:.5px;margin-bottom:4px">昨日异常</div>
+          <div style="font-size:26px;font-weight:800;color:{{ '#b91c1c' if yest_error_count > 0 else '#15803d' }};line-height:1.2">{{ yest_error_count }}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:4px">{{ '需关注' if yest_error_count > 0 else '一切正常' }}</div>
+        </td>
+        <td width="2"></td>
+        <td width="33%" style="padding:14px;background:#fff7ed;border-radius:8px;text-align:center;vertical-align:top">
+          <div style="font-size:11px;color:#c2410c;font-weight:600;letter-spacing:.5px;margin-bottom:4px">今日已执行</div>
+          <div style="font-size:26px;font-weight:800;color:#c2410c;line-height:1.2">{{ today_outline.total }}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:4px">覆盖 {{ today_outline.nonzero_count }} 类任务</div>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+
+  <!-- 🌙 今日凌晨调度执行结果（核心 — 用户每天 8 点最关心的内容） -->
+  {% if overnight.items %}
+  <tr><td style="padding:24px 28px 0">
+    <div style="font-size:17px;font-weight:800;color:#0f172a;border-left:4px solid #6d28d9;padding-left:10px;margin-bottom:6px">🌙 今日凌晨调度执行结果（{{ overnight.total_runs }} 个调度）</div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:10px">
+      <b style="color:#16a34a">{{ overnight.ok_runs }}</b> 成功 ·
+      {% if overnight.fail_runs > 0 %}<b style="color:#dc2626">{{ overnight.fail_runs }}</b> 失败 · {% endif %}
+      共完成查询 <b style="color:#6d28d9">{{ overnight.sum_total }}</b> 条（成功 <b style="color:#16a34a">{{ overnight.sum_ok }}</b>）
+    </div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px">
+      <thead>
+      <tr>
+        <th style="padding:8px 10px;background:#faf5ff;color:#6d28d9;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e9d5ff">完成时间</th>
+        <th style="padding:8px 10px;background:#faf5ff;color:#6d28d9;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e9d5ff">类型</th>
+        <th style="padding:8px 10px;background:#faf5ff;color:#6d28d9;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e9d5ff">客户</th>
+        <th style="padding:8px 10px;background:#faf5ff;color:#6d28d9;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e9d5ff">关键词</th>
+        <th style="padding:8px 10px;background:#faf5ff;color:#6d28d9;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e9d5ff">实际查询</th>
+        <th style="padding:8px 10px;background:#faf5ff;color:#6d28d9;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e9d5ff">成功</th>
+        <th style="padding:8px 10px;background:#faf5ff;color:#6d28d9;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e9d5ff">失败</th>
+        <th style="padding:8px 10px;background:#faf5ff;color:#6d28d9;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e9d5ff">状态</th>
+      </tr>
+      </thead>
+      <tbody>
+      {% for run in overnight['items'] %}
+      {% set is_fail = (run.status|lower in ['failed','fail','error','cancelled','canceled']) %}
+      <tr>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;font-family:Menlo,Consolas,monospace;font-size:11px;color:#475569;white-space:nowrap">{{ run.last_run_at[11:19] if run.last_run_at|length >= 19 else run.last_run_at }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9"><span style="display:inline-block;padding:2px 8px;background:#ede9fe;color:#6d28d9;border-radius:4px;font-size:11px;font-weight:600">{{ run.type_label }}</span></td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#0f172a;font-weight:500">{{ run.account_name }}{% if run.models_list %}<div style="font-size:11px;color:#94a3b8;margin-top:2px;font-weight:400">{{ run.models_list }}</div>{% endif %}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:#0f172a">{% if run.kw_count %}{{ run.kw_count }}{% else %}—{% endif %}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:#6d28d9;font-weight:700">{% if run.total %}{{ run.total }}{% else %}—{% endif %}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:#16a34a">{% if run.total %}{{ run.ok }}{% else %}—{% endif %}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:{{ '#dc2626' if run.fail > 0 else '#94a3b8' }}">{% if run.total %}{{ run.fail }}{% else %}—{% endif %}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9"><span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;{% if is_fail %}background:#fee2e2;color:#991b1b;{% else %}background:#dcfce7;color:#15803d;{% endif %}">{{ '失败' if is_fail else '完成' }}</span></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </td></tr>
+  {% else %}
+  <tr><td style="padding:24px 28px 0">
+    <div style="font-size:17px;font-weight:800;color:#0f172a;border-left:4px solid #6d28d9;padding-left:10px;margin-bottom:6px">🌙 今日凌晨调度执行结果</div>
+    <div style="padding:14px;background:#f8fafc;border-radius:6px;color:#64748b;font-size:13px">⚠ 今日凌晨暂无定时任务执行（请检查调度是否启用 + scheduler_daemon 是否运行）</div>
+  </td></tr>
+  {% endif %}
+
+  <!-- 0. 今日已执行明细 -->
+  {% if today_outline.display_items %}
+  <tr><td style="padding:20px 28px 0">
+    <div style="font-size:14px;font-weight:700;color:#0f172a;border-left:4px solid #c2410c;padding-left:10px;margin-bottom:10px">⏱ 今日已执行明细（截至 {{ generated_at[11:16] }}）</div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-size:12px">
+      <tr>
+      {% for it in today_outline.display_items %}
+        <td style="padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;text-align:center;width:{{ (100 / today_outline.display_items|length)|int }}%;vertical-align:top">
+          <div style="font-size:18px;font-weight:700;color:#c2410c;line-height:1.2">{{ it.n }}</div>
+          <div style="font-size:11px;color:#7c2d12;margin-top:2px">{{ it.label }}</div>
+        </td>
+        {% if not loop.last %}<td style="width:6px"></td>{% endif %}
+      {% endfor %}
+      </tr>
+    </table>
+  </td></tr>
+  {% endif %}
+
+  <!-- 0.5 各客户实际查询关键词数（核心 KPI） -->
+  {% for label, det, color, accent_bg, color_dim in [
+       ('🔍 今日各客户查词明细（截至 ' + generated_at[11:16] + '）', today_kw_detail, '#c2410c', '#fff7ed', '#fed7aa'),
+       ('🔍 昨日各客户查词明细（' + yesterday + '）', yest_kw_detail, '#1e40af', '#eff6ff', '#bfdbfe'),
+  ] %}
+  {% if det.rows %}
+  <tr><td style="padding:24px 28px 0">
+    <div style="font-size:16px;font-weight:700;color:#0f172a;border-left:4px solid {{ color }};padding-left:10px;margin-bottom:6px">{{ label }}</div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:10px">
+      合计 <b style="color:{{ color }}">{{ det.total_queries }}</b> 条查询 ·
+      <b style="color:#16a34a">{{ det.total_ok }}</b> 成功 ·
+      {% if det.total_fail > 0 %}<b style="color:#dc2626">{{ det.total_fail }}</b> 失败 · {% endif %}
+      覆盖 <b>{{ det.total_keywords }}</b> 个关键词 / <b>{{ det.rows|length }}</b> 个客户
+    </div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px">
+      <thead>
+      <tr>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">客户</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">关键词数</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">平台数</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">实际查询</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">成功</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">失败</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">成功率</th>
+      </tr>
+      </thead>
+      <tbody>
+      {% for row in det.rows %}
+      <tr>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#0f172a;font-weight:500">{{ row.company_name }}<div style="font-size:11px;color:#94a3b8;margin-top:2px;font-weight:400">{{ row.models }}</div></td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:#0f172a">{{ row.kw_count }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:#475569">{{ row.model_count }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:{{ color }};font-weight:700">{{ row.total }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:#16a34a">{{ row.ok }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:{{ '#dc2626' if row.fail > 0 else '#94a3b8' }}">{{ row.fail }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:{{ '#16a34a' if row.ok_rate >= 90 else ('#ea580c' if row.ok_rate >= 70 else '#dc2626') }};font-weight:600">{{ row.ok_rate }}%</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </td></tr>
+  {% endif %}
+  {% endfor %}
+
+  <!-- 1. 今日定时任务 -->
+  <tr><td style="padding:24px 28px 8px">
+    <div style="font-size:16px;font-weight:700;color:#0f172a;border-left:4px solid #1e40af;padding-left:10px;margin-bottom:12px">📅 今日定时任务（{{ today_due_count }}）</div>
+    {% if today_due %}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px">
+      <thead>
+      <tr>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">类型</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">客户</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">计划时间</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">上次状态</th>
+      </tr>
+      </thead>
+      <tbody>
+      {% for t in today_due %}
+      <tr>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9"><span style="display:inline-block;padding:2px 8px;background:#dbeafe;color:#1e40af;border-radius:4px;font-size:11px;font-weight:600">{{ t.type_label }}</span></td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#0f172a">{{ t.account_name }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#475569;font-family:Menlo,Consolas,monospace;font-size:12px">{{ t.next_run_at }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:{{ '#16a34a' if t.last_status == 'completed' else ('#dc2626' if t.last_status == 'failed' else '#64748b') }};font-size:12px">{{ t.last_status }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div style="padding:14px;background:#f8fafc;border-radius:6px;color:#64748b;font-size:13px">今日无待执行的定时任务</div>
+    {% endif %}
+  </td></tr>
+
+  <!-- 2. 昨日系统执行情况 -->
+  <tr><td style="padding:24px 28px 8px">
+    <div style="font-size:16px;font-weight:700;color:#0f172a;border-left:4px solid #16a34a;padding-left:10px;margin-bottom:12px">📊 昨日系统执行（{{ yesterday }}）</div>
+    {% if yest_summary %}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px">
+      <thead>
+      <tr>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">类别</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">总数</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">成功</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">失败</th>
+        <th style="padding:8px 10px;background:#f1f5f9;color:#475569;text-align:right;font-weight:600;font-size:12px;border-bottom:1px solid #e5e7eb">成功率</th>
+      </tr>
+      </thead>
+      <tbody>
+      {% for k, v in yest_summary.items() %}
+      {% set rate = (v.ok * 100 / v.total)|round(0)|int if v.total > 0 else 0 %}
+      <tr>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;color:#0f172a;font-weight:500">{{ v.label }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;font-family:Menlo,Consolas,monospace;color:#0f172a"><b>{{ v.total }}</b></td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:#16a34a;font-family:Menlo,Consolas,monospace">{{ v.ok }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:{{ '#dc2626' if v.fail > 0 else '#94a3b8' }};font-family:Menlo,Consolas,monospace">{{ v.fail }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #f1f5f9;text-align:right;color:{{ '#16a34a' if rate >= 90 else ('#ea580c' if rate >= 70 else '#dc2626') }};font-weight:600">{{ rate }}%</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div style="padding:14px;background:#f8fafc;border-radius:6px;color:#64748b;font-size:13px">昨日无系统执行记录</div>
+    {% endif %}
+  </td></tr>
+
+  <!-- 3. 异常清单 -->
+  {% if yest_errors %}
+  <tr><td style="padding:24px 28px 8px">
+    <div style="font-size:16px;font-weight:700;color:#0f172a;border-left:4px solid #dc2626;padding-left:10px;margin-bottom:12px">⚠️ 昨日异常清单（{{ yest_errors|length }}）</div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px">
+      <thead>
+      <tr>
+        <th style="padding:8px 10px;background:#fef2f2;color:#991b1b;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #fecaca">类型</th>
+        <th style="padding:8px 10px;background:#fef2f2;color:#991b1b;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #fecaca">ID</th>
+        <th style="padding:8px 10px;background:#fef2f2;color:#991b1b;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #fecaca">时间</th>
+        <th style="padding:8px 10px;background:#fef2f2;color:#991b1b;text-align:left;font-weight:600;font-size:12px;border-bottom:1px solid #fecaca">错误信息</th>
+      </tr>
+      </thead>
+      <tbody>
+      {% for e in yest_errors %}
+      <tr>
+        <td style="padding:8px 10px;border-bottom:1px solid #fee2e2"><span style="display:inline-block;padding:2px 8px;background:#fee2e2;color:#991b1b;border-radius:4px;font-size:11px;font-weight:600">{{ e.type }}</span></td>
+        <td style="padding:8px 10px;border-bottom:1px solid #fee2e2;font-family:Menlo,Consolas,monospace;font-size:11px;color:#475569">{{ e.id }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #fee2e2;font-family:Menlo,Consolas,monospace;font-size:11px;color:#475569;white-space:nowrap">{{ e.time[:19] }}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #fee2e2;color:#991b1b;font-size:12px;line-height:1.4">{{ e.msg or '—' }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </td></tr>
+  {% endif %}
+
+  <!-- Footer -->
+  <tr><td style="padding:24px 28px;background:#f8fafc;border-top:1px solid #e5e7eb;font-size:11px;color:#64748b;line-height:1.6">
+    <div style="margin-bottom:6px;font-weight:600;color:#475569">📨 自动化邮件 · 请勿直接回复</div>
+    <div>该报告由 GEO 系统每日 {{ generated_at[11:16] }} 自动生成发送，配置可在「系统设置 → 邮件通知」修改。</div>
+    <div style="margin-top:8px;color:#94a3b8">GEO 运营系统</div>
+  </td></tr>
+
+</table>
+
+</td></tr>
+</table>
+</body>
+</html>

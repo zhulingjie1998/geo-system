@@ -1,0 +1,12 @@
+.env
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.log
+logs/
+_dev/
+gunicorn.pid
+uploads/
+static/
+.DS_Store

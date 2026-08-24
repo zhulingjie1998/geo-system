@@ -1,0 +1,8 @@
+node_modules/
+dist/
+test-results/
+e2e-screenshots/
+*.log
+.env.local
+.codegraph/
+*.tmp

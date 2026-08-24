@@ -1,0 +1,114 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+*.env.local
+
+# Database
+*.db
+*.sqlite3
+*.db-journal
+
+# Logs
+logs/
+*.log
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Build output
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Tools
+.tools/
+
+# Debug files
+debug_*.txt
+_check_*.py
+_check_*.bat
+_fix_*.py
+_diagnose_*.py
+_test_*.py
+_test_*.bat
+_direct_*.py
+_simple_*.py
+_quick_*.py
+_batch_*.py
+_binary_*.py
+_auto_*.py
+_cleanup_*.py
+_dump_*.py
+_exact_*.py
+_find_*.py
+_import_*.py
+_open_*.bat
+_clear_*.py
+_run_server.py
+_zip*.bat
+_zip*.ps1
+_check_access.bat
+_check_firewall.bat
+_check_data.py
+_check_db.py
+_check_errors.py
+_check_hist_table.py
+_check_idx.py
+_check_route.py
+_check_routes.py
+_diagnose_history.py
+_direct_api_test.py
+_fix_db.py
+_fix_firewall.bat
+_fix_runtime.py
+_import_real_data.py
+_import_v2.py
+_api_test_v3.py
+_check_firewall.bat
+_fix_firewall.bat
+_open_firewall.bat
+_test_lan.bat
+manual_fixes.txt
+stuck.txt
+line2741.txt
+
+# Backend debug/fix scripts
+backend/_*.py
+backend/_*.sql
+backend/_*.bat
+backend/debug_*.py
+backend/fix_*.py
+backend/check_*.py
+backend/_cleanup_app.py
+backend/app.py.backup
+
+# PID
+*.pid
+gunicorn.pid
+
+# Session
+*.session

@@ -1,0 +1,13 @@
+[2026-08-19 09:17:08] _update_history_duration called: task_id=078752c0-e16
+[2026-08-20 09:17:09] _update_history_duration called: task_id=02f2556d-f8b
+  -> No history found for task_id=02f2556d-f8b
+[2026-08-20 11:32:14] _update_history_duration called: task_id=438dfb30-55e
+  -> No history found for task_id=438dfb30-55e
+[2026-08-21 11:56:38] _update_history_duration called: task_id=2868f467-08d
+  -> No history found for task_id=2868f467-08d
+[2026-08-22 11:33:24] _update_history_duration called: task_id=a00d36b9-682
+  -> No history found for task_id=a00d36b9-682
+[2026-08-23 11:33:11] _update_history_duration called: task_id=09083d21-f46
+  -> No history found for task_id=09083d21-f46
+[2026-08-24 11:33:25] _update_history_duration called: task_id=d19a6cf3-5ac
+  -> No history found for task_id=d19a6cf3-5ac
