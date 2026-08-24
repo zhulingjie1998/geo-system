@@ -392,11 +392,8 @@ def api_auth_login():
 
         password = data.get("password") or ""
 
-        if not username and not password:
-
-            pass
-
-        if raw_body:
+        # JSON 解析失败时，尝试 URL 编码格式（form-urlencoded）
+        if not username and not password and raw_body:
 
             try:
 
@@ -412,6 +409,7 @@ def api_auth_login():
 
                 pass
 
+        # 仍然为空时，尝试 form 和 args
         if not username and not password:
 
             username = (request.form.get("username") or request.args.get("username") or "").strip()

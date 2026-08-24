@@ -73,10 +73,12 @@ def load_env():
 
 def start_server():
     """启动服务器"""
+    _host = os.environ.get('GEO_DEV_HOST', '0.0.0.0')
+    _port = int(os.environ.get('GEO_DEV_PORT', '3106'))
     print("\n" + "="*50)
     print("  GEO 运营系统 - 开发服务器")
     print("="*50)
-    print(f"  地址: http://127.0.0.1:7007")
+    print(f"  地址: http://127.0.0.1:{_port}")
     print(f"  工作目录: {SCRIPT_DIR}")
     print("="*50 + "\n")
     
@@ -108,8 +110,8 @@ def start_server():
             print(f"[WARN] 定时任务调度器启动失败: {e}")
         
         app.run(
-            host='0.0.0.0',
-            port=7008,  # Changed from 7007 to avoid conflicts
+            host=os.environ.get('GEO_DEV_HOST', '0.0.0.0'),
+            port=int(os.environ.get('GEO_DEV_PORT', '3106')),
             debug=True,
             use_reloader=False,  # 避免重载问题
             threaded=True

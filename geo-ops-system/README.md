@@ -238,8 +238,9 @@ node_modules\.bin\vite.cmd --host 127.0.0.1
 
 | 服务 | 地址 |
 |------|------|
-| 前端 | http://127.0.0.1:3106 |
-| 后端 API | http://127.0.0.1:7106 |
+| 开发服务器（前后端合一） | http://127.0.0.1:3106（`GEO_DEV_PORT` 可改） |
+| 生产 Gunicorn | 127.0.0.1:7106（`GEO_GUNICORN_BIND` 可改） |
+| 生产对外 | http://80 / https://443（Nginx 反向代理） |
 | 数据库 | 127.0.0.1:3307（开发）/ 3306（生产） |
 
 ---
@@ -834,6 +835,10 @@ GEO_INIT_ADMIN=admin123                     # 初始管理员密码
 GEO_COOKIE_INSECURE=1                       # 本地 dev 设 1（HTTP 下启用 cookie）
 GEO_EXTERNAL_TOKEN_SECRET=xxx               # 外部入口 token 密钥
 
+# ===== 开发服务器（dev_server.py）=====
+GEO_DEV_HOST=0.0.0.0
+GEO_DEV_PORT=3106
+
 # ===== Gunicorn（生产）=====
 GEO_GUNICORN_BIND=127.0.0.1:7106
 GEO_GUNICORN_WORKERS=1
@@ -917,18 +922,28 @@ GEO_REDIS_DB=0
 
 6. **Nginx 配置示例**
    ```nginx
+   # HTTP → HTTPS 跳转
+   server {
+       listen 80;
+       server_name your-domain.com;
+       return 301 https://$host$request_uri;
+   }
+
+   # HTTPS 主站
    server {
        listen 443 ssl;
        server_name your-domain.com;
-       
+
        ssl_certificate /path/to/cert.pem;
        ssl_certificate_key /path/to/key.pem;
-       
+
+       # 前端静态文件
        location / {
            root /path/to/frontend/dist;
            try_files $uri $uri/ /index.html;
        }
-       
+
+       # API 反向代理到 Gunicorn
        location /api {
            proxy_pass http://127.0.0.1:7106;
            proxy_set_header Host $host;

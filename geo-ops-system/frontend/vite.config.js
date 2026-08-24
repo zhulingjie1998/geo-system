@@ -44,12 +44,12 @@ export default defineConfig({
     legalComments: 'none',
   },
   server: {
-    port: 3106,
+    port: 5173,
     open: false,
     host: '0.0.0.0',
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:7008',  // Changed from 7007
+        target: 'http://127.0.0.1:' + (process.env.GEO_DEV_PORT || '3106'),
         changeOrigin: true
       }
     }

@@ -19,7 +19,7 @@ if errorlevel 1 (
 
 :: 启动服务器
 echo [INFO] 正在启动服务器...
-echo [INFO] 地址: http://127.0.0.1:7007
+echo [INFO] 地址: http://127.0.0.1:3106 (可通过 GEO_DEV_PORT 环境变量修改)
 echo.
 echo 按 Ctrl+C 停止服务器
 echo --------------------------------------------
