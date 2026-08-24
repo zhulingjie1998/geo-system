@@ -882,45 +882,71 @@ GEO_REDIS_DB=0
 [ Redis ] ← :6379 (可选)
 ```
 
-### 生产部署步骤
+### 生产部署步骤（Git 拉取方式）
 
-1. **准备数据库**
+> **推荐**：使用 `deploy.sh` 一键部署，无需手动上传文件。
+
+#### 首次部署
+
+1. **克隆代码到服务器**
    ```bash
-   mysql -u root -p < migrations/init_production.sql
+   cd /www/wwwroot
+   git clone https://github.com/zhulingjie1998/geo-system.git GEO
+   cd GEO
    ```
 
 2. **配置环境变量**
    ```bash
    cp backend/.env.example backend/.env
-   # 编辑 .env 填入生产配置
+   # 编辑 .env 填入生产配置（数据库密码、密钥等）
+   vi backend/.env
    ```
 
-3. **安装依赖**
+3. **安装后端依赖**
    ```bash
    cd backend
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
+   /www/server/pyporject_evn/GEO/bin/pip install -r requirements.txt
    ```
 
-4. **构建前端**
+4. **安装前端依赖并构建**
    ```bash
-   cd frontend
+   cd ../frontend
+   npm install -g pnpm   # 如果没有 pnpm
    pnpm install
    pnpm build
-   # 输出到 dist/
    ```
 
-5. **启动服务**
+5. **部署前端到后端 static**
    ```bash
-   # 后端（生产模式）
-   cd backend
-   gunicorn -c gunicorn_conf.py app:app
-
-   # 或使用 systemd / supervisor 管理
+   cp -r dist ../backend/static
    ```
 
-6. **Nginx 配置示例**
+6. **启动 Gunicorn**
+   ```bash
+   cd ../backend
+   /www/server/pyporject_evn/GEO/bin/gunicorn -c gunicorn_conf.py app:app --daemon
+   ```
+
+7. **配置 Nginx**（见下方配置示例）
+
+#### 后续更新（一键部署）
+
+每次代码推送到 GitHub 后，在服务器上执行：
+
+```bash
+cd /www/wwwroot/GEO
+bash deploy.sh
+```
+
+`deploy.sh` 会自动完成：
+1. `git pull` 拉取最新代码
+2. 安装后端依赖（如有更新）
+3. 重新构建前端
+4. 复制 dist 到 backend/static
+5. 重启 Gunicorn
+6. 验证服务是否正常
+
+### Nginx 配置示例
    ```nginx
    # HTTP → HTTPS 跳转
    server {
