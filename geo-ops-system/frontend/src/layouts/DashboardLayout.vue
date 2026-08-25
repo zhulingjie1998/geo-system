@@ -50,6 +50,12 @@
             <span>查词管理</span>
           </RouterLink>
         </el-tooltip>
+        <el-tooltip content="排名分析" placement="right" :disabled="!collapsed || isMobile || sidebarHover" :show-after="200">
+          <RouterLink v-if="canAccess('ranking-analysis')" to="/dashboard/ranking-analysis" class="nav-item">
+            <el-icon><TrendCharts /></el-icon>
+            <span>排名分析</span>
+          </RouterLink>
+        </el-tooltip>
         <el-tooltip content="GEO拓词" placement="right" :disabled="!collapsed || isMobile || sidebarHover" :show-after="200">
           <RouterLink v-if="canAccess('home')" to="/dashboard/geo-expansion" class="nav-item">
             <el-icon><MagicStick /></el-icon>
@@ -145,7 +151,7 @@
 <script setup>
 import { computed, ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
-import { House, User, UserFilled, MagicStick, Setting, Menu, Fold, Expand, Promotion } from '@element-plus/icons-vue'
+import { House, User, UserFilled, MagicStick, Setting, Menu, Fold, Expand, Promotion, Search, TrendCharts } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import api from '../api'
 import { resetAuthState } from '../utils/auth'
@@ -261,7 +267,7 @@ const pageDesc = computed(() => {
   if (route.path.includes('/dashboard/knowledge')) return '为付费客户维护品牌知识库：上传素材、生成与管理知识库版本。'
   if (route.path.includes('/dashboard/keyword-search')) return '查看客户查词概况，点击进入详细查词管理。'
   if (route.path.includes('/dashboard/effect-analysis')) return '跨客户的效果总览：上榜率、当天上榜词、掉线词预警、排名波动与客户健康度。'
-  if (route.path.includes('/dashboard/ranking-analysis')) return '从查词结果提取品牌并计算排名，支持趋势追踪与 CSV 导出。'
+  if (route.path.includes('/dashboard/ranking-analysis')) return '从查词结果提取品牌并计算排名；也可手动填写提示词与品牌新建分析，结果支持 Excel / CSV 导出。'
   if (route.path.includes('/dashboard/citation-analysis')) return '抓取引用源网页内容，分析发布日期、内容类型与网站类型。'
   if (route.path.includes('/dashboard/quote')) return '基于五维评分生成非标客户报价。'
   if (route.path.includes('/dashboard/scheduled-tasks')) return '统一管理所有客户的定时查词、定时排名任务。'

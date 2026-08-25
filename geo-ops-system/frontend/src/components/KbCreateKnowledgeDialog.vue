@@ -339,11 +339,32 @@ async function generateKb() {
     if (!sourceIds.length) throw new Error('资料未准备完成，请稍后重试')
 
     const result = await publishApi.kbGenerate(accountId.value, remark.value, sourceIds)
-    await pollTask(result.task_id)
+
+    // 【修复】通知全局 KbTaskFloat 组件显示离线任务
+    window.dispatchEvent(new CustomEvent('kb-task-start', {
+      detail: {
+        phase: 'llm',
+        taskId: result.task_id,
+        accountId: accountId.value,
+        accountName: pickedAccountLabel.value,
+        hint: `AI 正在生成 ${pickedAccountLabel.value} 知识库...`,
+        text: '正在分析基础资料并按 GEO 10 模块生成...',
+      },
+    }))
+
+    // 【修复】立即关闭弹窗 + 重置 busy 状态（支持多任务：用户可立即创建下一个）
+    visible.value = false
+    busy.value = ''
+    ElMessage.info('知识库生成任务已提交，可继续做其它事，完成后右下角自动通知')
+
+    // 后台静默轮询（fire-and-forget，不阻塞 UI）
+    pollTask(result.task_id).catch(() => {})
   } catch (e) {
+    window.dispatchEvent(new CustomEvent('kb-task-failed', { detail: { error: e.message || '生成失败' } }))
     ElMessage.error(e?.response?.data?.error || e.message || '生成失败')
   } finally {
-    busy.value = ''
+    // 【修复】确保 busy 始终被重置
+    if (busy.value === 'generate') busy.value = ''
   }
 }
 
@@ -358,6 +379,10 @@ async function pollTask(id) {
         if (status.status === 'done') {
           clearInterval(pollTimer)
           pollTimer = null
+          // 【修复】通知全局组件任务完成
+          window.dispatchEvent(new CustomEvent('kb-task-done', {
+            detail: { accountId: accountId.value, kbId: status.kb_id, version: status.version }
+          }))
           ElMessage.success(`知识库 v${status.version} 生成完成`)
           visible.value = false
           emit('created', { ...status, accountId: accountId.value })
@@ -367,6 +392,8 @@ async function pollTask(id) {
         if (status.status === 'failed') {
           clearInterval(pollTimer)
           pollTimer = null
+          // 【修复】通知全局组件任务失败
+          window.dispatchEvent(new CustomEvent('kb-task-failed', { detail: { error: status.error || '生成失败' } }))
           reject(new Error(status.error || '生成失败'))
           return
         }

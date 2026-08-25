@@ -23,6 +23,7 @@ import PublishKbDetailPage from '../views/PublishKbDetailPage.vue'
 import PublishAiWritePage from '../views/PublishAiWritePage.vue'
 import PublishInstructionPage from '../views/PublishInstructionPage.vue'
 import GeoExpansionPage from '../views/GeoExpansionPage.vue'
+import RankingAnalysisPage from '../views/RankingAnalysisPage.vue'
 import api from '../api'
 import { getAuthState, setAuthState, resetAuthState } from '../utils/auth'
 
@@ -38,6 +39,7 @@ const routes = [
       { path: 'accounts', name: 'DashboardAccounts', component: AccountManagementPage },
       { path: 'keyword-search', name: 'KeywordSearch', component: KeywordSearchPage },
       { path: 'keyword-search/:accountId', name: 'KeywordSearchDetail', component: KeywordSearchDetailPage },
+      { path: 'ranking-analysis', name: 'RankingAnalysis', component: RankingAnalysisPage },
       { path: 'geo-expansion', name: 'GeoExpansion', component: GeoExpansionPage },
       { path: 'knowledge', name: 'DashboardKnowledge', component: KnowledgeBasePage },
       { path: 'admin-users', name: 'AdminUsers', component: AdminUsersPage },
@@ -116,6 +118,7 @@ const PAGE_KEY_MAP = {
   'DashboardAccounts': 'accounts',
   'KeywordSearch': 'keyword-search',
   'KeywordSearchDetail': 'keyword-search',
+  'RankingAnalysis': 'ranking-analysis',
   'DashboardKnowledge': 'knowledge',
   'AdminUsers': 'admin-users',
   'Roles': 'roles',

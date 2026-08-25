@@ -240,6 +240,12 @@ def _init_schema(conn):
             done INT DEFAULT 0,
             skipped INT DEFAULT 0,
             hit INT DEFAULT 0,
+            top1 INT DEFAULT 0,
+            top3 INT DEFAULT 0,
+            gen_total INT DEFAULT 0,
+            gen_hit INT DEFAULT 0,
+            gen_top3 INT DEFAULT 0,
+            gen_top1 INT DEFAULT 0,
             error_message TEXT,
             created_at VARCHAR(255)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
@@ -348,6 +354,7 @@ def _init_schema(conn):
             id INT AUTO_INCREMENT PRIMARY KEY,
             account_id INT NOT NULL,
             name VARCHAR(255),
+            sub_type VARCHAR(20) NOT NULL DEFAULT 'search',
             models TEXT,
             frequency VARCHAR(10) NOT NULL DEFAULT 'daily',
             run_time VARCHAR(5) NOT NULL DEFAULT '00:01',
@@ -591,6 +598,8 @@ def _ensure_columns(conn) -> None:
         ("search_result", "rescue_round",        "VARCHAR(30) NOT NULL DEFAULT 'initial'"),
         # 定时任务执行锁（防止API和调度器并发执行）
         ("scheduled_search_task", "execution_lock", "VARCHAR(20) DEFAULT NULL"),
+        # 定时任务子类型（search 查词 / ranking 排名分析）
+        ("scheduled_search_task", "sub_type", "VARCHAR(20) NOT NULL DEFAULT 'search'"),
         # 知识库资料智能识别文本（Qwen3.7 识别后输出）
         ("customer_knowledge_source", "ai_text", "LONGTEXT NULL"),
         ("customer_knowledge_source", "ai_status", "VARCHAR(20) NOT NULL DEFAULT 'pending'"),
@@ -4615,6 +4624,8 @@ def _sched_to_dict(row, account: Optional[dict] = None) -> dict:
         "id": d["id"],
         "accountId": d["account_id"],
         "name": d.get("name") or "",
+        "subType": d.get("sub_type") or "search",
+        "taskType": "single",
         "models": models,
         "frequency": d.get("frequency", "daily"),
         "runTime": d.get("run_time", "00:01"),
@@ -4689,15 +4700,16 @@ def create_scheduled_search_task(data: dict) -> dict:
     run_time = data.get("runTime") or "00:01"
     day_of_week = int(data.get("dayOfWeek") if data.get("dayOfWeek") is not None else 6)
     day_of_month = int(data.get("dayOfMonth") if data.get("dayOfMonth") is not None else -1)
+    sub_type = data.get("subType") or "search"
     next_run = compute_next_run(frequency, run_time, day_of_week, day_of_month)
     models_json = json.dumps(data.get("models") or [], ensure_ascii=False)
     with transaction() as conn:
         cur = _exec(conn,
             """INSERT INTO scheduled_search_task
-               (account_id, name, models, frequency, run_time, day_of_week, day_of_month,
+               (account_id, name, sub_type, models, frequency, run_time, day_of_week, day_of_month,
                 enabled, next_run_at, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (int(data["accountId"]), data.get("name") or "", models_json, frequency,
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (int(data["accountId"]), data.get("name") or "", sub_type, models_json, frequency,
              run_time, day_of_week, day_of_month, 1 if data.get("enabled", True) else 0,
              next_run, now),
         )
@@ -4717,14 +4729,15 @@ def update_scheduled_search_task(sched_id: int, data: dict) -> Optional[dict]:
     models = data.get("models", row["models"])
     models_json = json.dumps(models or [], ensure_ascii=False)
     name = data.get("name", row["name"])
+    sub_type = data.get("subType", row.get("subType", "search"))
     next_run = compute_next_run(frequency, run_time, day_of_week, day_of_month)
     with transaction() as conn:
         _exec(conn,
             """UPDATE scheduled_search_task
-               SET name=%s, models=%s, frequency=%s, run_time=%s, day_of_week=%s, day_of_month=%s,
+               SET name=%s, sub_type=%s, models=%s, frequency=%s, run_time=%s, day_of_week=%s, day_of_month=%s,
                    enabled=%s, next_run_at=%s
                WHERE id=%s""",
-            (name, models_json, frequency, run_time, day_of_week, day_of_month,
+            (name, sub_type, models_json, frequency, run_time, day_of_week, day_of_month,
              enabled, next_run, sched_id),
         )
     return get_scheduled_search_task(sched_id)
@@ -7034,3 +7047,336 @@ def list_ranking_results(ranking_task_id: str) -> list[dict]:
         "FROM ranking_result WHERE ranking_task_id=%s ORDER BY id",
         (ranking_task_id,))
     return [dict(r) for r in rows]
+
+
+# ════════════════════════════════════════════════════════════
+# 排名分析聚合查询(供 rank-tool API 使用)
+# ════════════════════════════════════════════════════════════
+
+def get_ranking_task_list_with_stats(owner_id: int | None = None,
+                                      team_id: int | None = None,
+                                      include_temp: bool = False,
+                                      limit: int = 500) -> list[dict]:
+    """排名分析主列表：按 account 聚合，每行一个客户。
+
+    返回前端期望的结构:
+      [{id, customerName, type, brands[], analysisCount, resultCount,
+        rankingRate, top3Rate, status, lastAnalysisTime}]
+    """
+    conn = get_conn()
+    # 基础条件
+    where_parts = ["a.deleted_at IS NULL"]
+    params: list = []
+    if not include_temp:
+        where_parts.append("(a.is_temp IS NULL OR a.is_temp=0)")
+    if team_id is not None:
+        where_parts.append("a.team_id=%s")
+        params.append(team_id)
+    elif owner_id is not None:
+        where_parts.append(
+            "(a.owner_id=%s OR EXISTS (SELECT 1 FROM account_owner ao "
+            "WHERE ao.account_id=a.id AND ao.owner_user_id=%s))")
+        params.append(owner_id)
+        params.append(owner_id)
+    where_sql = " AND ".join(where_parts)
+
+    # 查询每个 account 的排名任务汇总
+    rows = _fetchall(conn,
+        f"""SELECT a.id, a.company_name, a.company_brand, a.user_type, a.is_temp,
+                  a.status AS account_status,
+                  (SELECT COUNT(*) FROM ranking_task rt2 WHERE rt2.account_id=a.id) AS analysis_count,
+                  (SELECT COUNT(*) FROM ranking_result rr2
+                   JOIN ranking_task rt3 ON rr2.ranking_task_id=rt3.id
+                   WHERE rt3.account_id=a.id) AS result_count,
+                  (SELECT MAX(rt4.created_at) FROM ranking_task rt4 WHERE rt4.account_id=a.id) AS last_analysis_time,
+                  (SELECT rt5.status FROM ranking_task rt5 WHERE rt5.account_id=a.id
+                   ORDER BY rt5.created_at DESC LIMIT 1) AS last_status,
+                  (SELECT rt6.brand_name FROM ranking_task rt6 WHERE rt6.account_id=a.id
+                   ORDER BY rt6.created_at DESC LIMIT 1) AS last_brand_name,
+                  (SELECT SUM(CASE WHEN rr.brand_rank IS NOT NULL AND rr.brand_rank>0 THEN 1 ELSE 0 END)
+                   FROM ranking_result rr
+                   JOIN ranking_task rt7 ON rr.ranking_task_id=rt7.id
+                   WHERE rt7.account_id=a.id) AS ranked_count,
+                  (SELECT SUM(CASE WHEN rr.brand_rank IS NOT NULL AND rr.brand_rank<=3 AND rr.brand_rank>0 THEN 1 ELSE 0 END)
+                   FROM ranking_result rr
+                   JOIN ranking_task rt8 ON rr.ranking_task_id=rt8.id
+                   WHERE rt8.account_id=a.id) AS top3_count
+           FROM account a
+           WHERE {where_sql}
+           HAVING analysis_count > 0 OR last_status IS NOT NULL
+           ORDER BY last_analysis_time DESC
+           LIMIT %s""",
+        params + [limit])
+
+    out = []
+    for r in rows:
+        result_count = int(r.get("result_count") or 0)
+        ranked_count = int(r.get("ranked_count") or 0)
+        top3_count = int(r.get("top3_count") or 0)
+        ranking_rate = round(ranked_count * 100 / result_count) if result_count > 0 else 0
+        top3_rate = round(top3_count * 100 / result_count) if result_count > 0 else 0
+        last_status = r.get("last_status") or "done"
+        # 映射状态: running→running, completed→done, failed→error, pending→pending
+        status_map = {"running": "running", "completed": "done",
+                      "failed": "error", "pending": "pending", "": "done"}
+        status = status_map.get(last_status, "done")
+        # 解析品牌名
+        brands = _parse_brand_list(r.get("last_brand_name") or "")
+        out.append({
+            "id": r["id"],
+            "customerName": r.get("company_name") or "",
+            "type": "temp" if r.get("is_temp") else "paid",
+            "brands": brands,
+            "analysisCount": int(r.get("analysis_count") or 0),
+            "resultCount": result_count,
+            "rankingRate": ranking_rate,
+            "top3Rate": top3_rate,
+            "status": status,
+            "lastAnalysisTime": r.get("last_analysis_time") or "",
+        })
+    return out
+
+
+def get_ranking_keyword_data(account_id: int, date: str = "") -> list[dict]:
+    """获取某客户的关键词排名明细，按 keyword 聚合多平台。
+
+    返回前端期望的结构:
+      [{id, keyword, type, model, bestRank, engines[{name, rank}], snippet}]
+    """
+    conn = get_conn()
+    if date:
+        rows = _fetchall(conn,
+            """SELECT sr.id, sr.keyword, sr.platform, sr.model, sr.brand_rank,
+                      sr.answer_text, sr.intent_prompt, sr.search_date
+               FROM search_result sr
+               INNER JOIN (SELECT MAX(id) as max_id FROM search_result
+                           WHERE account_id=%s AND search_date=%s AND success=1
+                           GROUP BY keyword, model) t
+               ON sr.id = t.max_id
+               ORDER BY sr.keyword""",
+            (account_id, date))
+    else:
+        rows = _fetchall(conn,
+            """SELECT sr.id, sr.keyword, sr.platform, sr.model, sr.brand_rank,
+                      sr.answer_text, sr.intent_prompt, sr.search_date
+               FROM search_result sr
+               INNER JOIN (SELECT MAX(id) as max_id FROM search_result
+                           WHERE account_id=%s AND success=1
+                           GROUP BY keyword, model, search_date) t
+               ON sr.id = t.max_id
+               ORDER BY sr.keyword DESC LIMIT 500""",
+            (account_id,))
+
+    if not rows:
+        return []
+
+    # 获取该客户的品牌名用于判断通用词/品牌词
+    acc = get_account(account_id)
+    brand_name = (acc or {}).get("companyBrand") or ""
+    brand_aliases = _brand_aliases_lower(_parse_brand_list(brand_name))
+
+    # 按 keyword 聚合
+    kw_map: dict = {}
+    for r in rows:
+        kw = r.get("keyword") or ""
+        if kw not in kw_map:
+            kw_lower = kw.lower()
+            is_brand = any(a and a in kw_lower for a in brand_aliases)
+            kw_map[kw] = {
+                "id": r["id"],
+                "keyword": kw,
+                "type": "品牌词" if is_brand else "通用词",
+                "model": r.get("platform") or r.get("model") or "",
+                "bestRank": None,
+                "engines": [],
+                "snippet": "",
+                "_ranks": [],
+            }
+        entry = kw_map[kw]
+        rank = r.get("brand_rank")
+        platform_name = r.get("platform") or r.get("model") or ""
+        entry["engines"].append({"name": platform_name, "rank": rank})
+        if rank and isinstance(rank, int) and rank > 0:
+            entry["_ranks"].append(rank)
+
+    # 计算 bestRank 和 snippet
+    for entry in kw_map.values():
+        ranks = entry.pop("_ranks", [])
+        if ranks:
+            entry["bestRank"] = min(ranks)
+        # snippet: 从 answer_text 截取前 200 字
+        # (实际应截取品牌上下文，但 answer_text 在 light 查询中未取)
+        # 这里用 intent_prompt 作为 snippet 兜底
+        entry["snippet"] = entry.get("snippet") or ""
+
+    return list(kw_map.values())
+
+
+def get_ranking_history_list(account_id: int | None = None,
+                             owner_id: int | None = None,
+                             team_id: int | None = None,
+                             limit: int = 100) -> list[dict]:
+    """排名分析历史列表。
+
+    返回前端期望的结构:
+      [{id, createdAt, queryTime, brands[], totalCount, progress, status}]
+    """
+    conn = get_conn()
+    where_parts = []
+    params: list = []
+    if account_id is not None:
+        where_parts.append("rt.account_id=%s")
+        params.append(account_id)
+    if team_id is not None:
+        where_parts.append("a.team_id=%s")
+        params.append(team_id)
+    elif owner_id is not None:
+        where_parts.append(
+            "(a.owner_id=%s OR EXISTS (SELECT 1 FROM account_owner ao "
+            "WHERE ao.account_id=a.id AND ao.owner_user_id=%s))")
+        params.append(owner_id)
+        params.append(owner_id)
+    where_sql = " WHERE " + " AND ".join(where_parts) if where_parts else ""
+
+    rows = _fetchall(conn,
+        f"""SELECT rt.id, rt.search_task_id, rt.account_id, rt.brand_name,
+                  rt.status, rt.total, rt.done, rt.skipped, rt.hit,
+                  rt.created_at, a.company_name
+           FROM ranking_task rt
+           LEFT JOIN account a ON rt.account_id=a.id
+           {where_sql}
+           ORDER BY rt.created_at DESC
+           LIMIT %s""",
+        params + [limit])
+
+    out = []
+    for r in rows:
+        total = int(r.get("total") or 0)
+        done = int(r.get("done") or 0)
+        progress = round(done * 100 / total) if total > 0 else 0
+        status_map = {"completed": "完成", "running": "进行中",
+                      "failed": "异常", "pending": "等待中"}
+        out.append({
+            "id": r["id"],
+            "createdAt": r.get("created_at") or "",
+            "queryTime": _extract_search_date(r.get("search_task_id") or ""),
+            "brands": _parse_brand_list(r.get("brand_name") or ""),
+            "totalCount": total,
+            "progress": progress,
+            "status": status_map.get(r.get("status"), r.get("status") or ""),
+            "customerName": r.get("company_name") or "",
+            "accountId": r.get("account_id"),
+        })
+    return out
+
+
+def get_ranking_detail_by_account(account_id: int) -> dict:
+    """获取某客户的排名分析详情汇总。
+
+    返回:
+      {customerName, brands[], analysisCount, resultCount,
+       rankingRate, top3Rate, status, lastAnalysisTime,
+       keywordData[], historyData[]}
+    """
+    conn = get_conn()
+    # 取客户信息
+    acc = get_account(account_id)
+    if not acc:
+        return {}
+
+    # 取最近一次排名任务
+    rt = _fetchone(conn,
+        "SELECT * FROM ranking_task WHERE account_id=%s ORDER BY created_at DESC LIMIT 1",
+        (account_id,))
+
+    # 统计
+    stats = _fetchone(conn,
+        """SELECT COUNT(*) as total_results,
+                  SUM(CASE WHEN brand_rank IS NOT NULL AND brand_rank>0 THEN 1 ELSE 0 END) as ranked,
+                  SUM(CASE WHEN brand_rank IS NOT NULL AND brand_rank<=3 AND brand_rank>0 THEN 1 ELSE 0 END) as top3
+           FROM ranking_result rr
+           JOIN ranking_task rt ON rr.ranking_task_id=rt.id
+           WHERE rt.account_id=%s""",
+        (account_id,))
+
+    total_results = int((stats or {}).get("total_results") or 0)
+    ranked = int((stats or {}).get("ranked") or 0)
+    top3 = int((stats or {}).get("top3") or 0)
+
+    # 关键词数据
+    search_date = _extract_search_date((rt or {}).get("search_task_id") or "")
+    keyword_data = get_ranking_keyword_data(account_id, search_date)
+
+    # 历史数据
+    history_data = get_ranking_history_list(account_id=account_id, limit=50)
+
+    brands = _parse_brand_list((rt or {}).get("brand_name") or "")
+    last_status = (rt or {}).get("status") or "completed"
+    status_map = {"running": "running", "completed": "done",
+                  "failed": "error", "pending": "pending"}
+    analysis_count = _fetchone(conn,
+        "SELECT COUNT(*) as cnt FROM ranking_task WHERE account_id=%s",
+        (account_id,))
+    analysis_count = int((analysis_count or {}).get("cnt") or 0)
+
+    return {
+        "id": account_id,
+        "customerName": acc.get("companyName") or "",
+        "type": "temp" if acc.get("isTemp") else "paid",
+        "brands": brands,
+        "analysisCount": analysis_count,
+        "resultCount": total_results,
+        "rankingRate": round(ranked * 100 / total_results) if total_results > 0 else 0,
+        "top3Rate": round(top3 * 100 / total_results) if total_results > 0 else 0,
+        "status": status_map.get(last_status, "done"),
+        "lastAnalysisTime": (rt or {}).get("created_at") or "",
+        "keywordData": keyword_data,
+        "historyData": history_data,
+    }
+
+
+def get_ranking_account_summary(account_id: int) -> dict:
+    """获取某客户的排名分析汇总（用于列表行）。"""
+    conn = get_conn()
+    acc = get_account(account_id)
+    if not acc:
+        return {}
+
+    rt = _fetchone(conn,
+        "SELECT * FROM ranking_task WHERE account_id=%s ORDER BY created_at DESC LIMIT 1",
+        (account_id,))
+
+    stats = _fetchone(conn,
+        """SELECT COUNT(*) as total_results,
+                  SUM(CASE WHEN brand_rank IS NOT NULL AND brand_rank>0 THEN 1 ELSE 0 END) as ranked,
+                  SUM(CASE WHEN brand_rank IS NOT NULL AND brand_rank<=3 AND brand_rank>0 THEN 1 ELSE 0 END) as top3
+           FROM ranking_result rr
+           JOIN ranking_task rt ON rr.ranking_task_id=rt.id
+           WHERE rt.account_id=%s""",
+        (account_id,))
+
+    total_results = int((stats or {}).get("total_results") or 0)
+    ranked = int((stats or {}).get("ranked") or 0)
+    top3 = int((stats or {}).get("top3") or 0)
+    analysis_count = _fetchone(conn,
+        "SELECT COUNT(*) as cnt FROM ranking_task WHERE account_id=%s",
+        (account_id,))
+    analysis_count = int((analysis_count or {}).get("cnt") or 0)
+
+    brands = _parse_brand_list((rt or {}).get("brand_name") or "")
+    last_status = (rt or {}).get("status") or "completed"
+    status_map = {"running": "running", "completed": "done",
+                  "failed": "error", "pending": "pending"}
+
+    return {
+        "id": account_id,
+        "customerName": acc.get("companyName") or "",
+        "type": "temp" if acc.get("isTemp") else "paid",
+        "brands": brands,
+        "analysisCount": analysis_count,
+        "resultCount": total_results,
+        "rankingRate": round(ranked * 100 / total_results) if total_results > 0 else 0,
+        "top3Rate": round(top3 * 100 / total_results) if total_results > 0 else 0,
+        "status": status_map.get(last_status, "done"),
+        "lastAnalysisTime": (rt or {}).get("created_at") or "",
+    }

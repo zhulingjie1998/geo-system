@@ -6052,12 +6052,148 @@ iframe{width:100%;height:100vh;border:none}
 </html>
 """
 
-# Execute ranking analysis stub
+# Execute ranking analysis — parse AI answer text to extract brand positions
 def _execute_ranking_analysis(task_id: str, keywords: list, brands: list, offset: dict = None):
-    """Execute ranking analysis for given task and keywords."""
-    from datetime import datetime
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    db.update_ranking_task(task_id, status="completed", done=offset.get("done", 0) + len(keywords) if offset else len(keywords))
+    """Execute ranking analysis for given task and keywords.
+
+    Parses AI answer_text to find brand positions, computes brand_rank,
+    writes brand_analysis_json to search_result, and saves ranking_result records.
+    """
+    import re as _re
+
+    task = db.get_ranking_task(task_id)
+    if not task:
+        return
+
+    account_id = task.get("accountId") or task.get("account_id")
+    search_task_id = task.get("searchTaskId") or task.get("search_task_id") or ""
+    search_date = db._extract_search_date(search_task_id)
+
+    # 获取该客户该日期的查词结果
+    if search_date:
+        results = db.get_search_results(account_id, search_date)
+    else:
+        results = db.get_search_results(account_id)
+
+    if not results:
+        db.update_ranking_task(task_id, status="completed",
+                               done=offset.get("done", 0) if offset else 0,
+                               total=offset.get("total", 0) if offset else 0)
+        return
+
+    # 品牌别名（小写）
+    brand_aliases = db._brand_aliases_lower(brands)
+
+    done = offset.get("done", 0) if offset else 0
+    skipped = offset.get("skipped", 0) if offset else 0
+    hit = offset.get("hit", 0) if offset else 0
+    total = len(results)
+
+    db.update_ranking_task(task_id, status="running",
+                           total=(offset.get("total", 0) if offset else 0) + total)
+
+    for r in results:
+        result_id = r.get("id")
+        keyword = r.get("keyword") or ""
+        platform = r.get("platform") or r.get("model") or ""
+        answer_text = r.get("answerText") or ""
+
+        if not answer_text or not r.get("success"):
+            # 查词失败的跳过
+            skipped += 1
+            db.save_ranking_result({
+                "ranking_task_id": task_id,
+                "result_id": result_id,
+                "keyword": keyword,
+                "model": platform,
+                "brand_rank": None,
+                "brand_frequency": 0,
+                "total_brands": 0,
+                "all_brands_json": "[]",
+                "skipped": True,
+                "error": r.get("error_message") or "no answer text",
+            })
+            continue
+
+        # 解析 AI 回答文本，提取品牌出现位置
+        brand_rank, brand_frequency, all_brands, snippet = _extract_brand_position(
+            answer_text, brand_aliases)
+
+        # 写回 search_result
+        analysis_json = json.dumps({
+            "brand_rank": brand_rank,
+            "brand_frequency": brand_frequency,
+            "all_brands": all_brands,
+            "snippet": snippet,
+        }, ensure_ascii=False)
+        db.update_result_brand(result_id, brand_rank, analysis_json)
+
+        # 保存 ranking_result
+        db.save_ranking_result({
+            "ranking_task_id": task_id,
+            "result_id": result_id,
+            "keyword": keyword,
+            "model": platform,
+            "brand_rank": brand_rank,
+            "brand_frequency": brand_frequency,
+            "total_brands": len(all_brands),
+            "all_brands_json": json.dumps(all_brands, ensure_ascii=False),
+            "skipped": False,
+            "error": "",
+        })
+
+        if brand_rank and brand_rank > 0:
+            hit += 1
+        done += 1
+
+    db.update_ranking_task(task_id, status="completed",
+                           done=done, skipped=skipped, hit=hit)
+
+
+def _extract_brand_position(answer_text: str, brand_aliases: list) -> tuple:
+    """从 AI 回答文本中提取品牌出现位置。
+
+    策略:
+    1. 将回答按行分割
+    2. 在每行中查找品牌名出现位置
+    3. brand_rank = 品牌第一次出现的行号（排名）
+    4. brand_frequency = 品牌出现总次数
+    5. all_brands = 所有品牌及其首次出现位置
+    6. snippet = 品牌首次出现的上下文片段
+
+    Returns: (brand_rank, brand_frequency, all_brands, snippet)
+    """
+    if not answer_text or not brand_aliases:
+        return None, 0, [], ""
+
+    lines = answer_text.split("\n")
+    # 去除空行
+    lines = [l.strip() for l in lines if l.strip()]
+
+    if not lines:
+        return None, 0, [], ""
+
+    brand_first_line = None
+    brand_frequency = 0
+    all_brands_map = {}  # brand_alias -> first_line_index
+    snippet = ""
+
+    for line_idx, line in enumerate(lines, 1):
+        line_lower = line.lower()
+        for alias in brand_aliases:
+            if alias and alias in line_lower:
+                brand_frequency += 1
+                if brand_first_line is None:
+                    brand_first_line = line_idx
+                    snippet = line[:200]  # 截取前200字符
+                if alias not in all_brands_map:
+                    all_brands_map[alias] = line_idx
+
+    # 构建 all_brands 列表
+    all_brands = [{"name": a, "firstLine": idx}
+                  for a, idx in sorted(all_brands_map.items(), key=lambda x: x[1])]
+
+    return brand_first_line, brand_frequency, all_brands, snippet
 
 
 @app.get("/share/report/<int:report_id>")
@@ -6817,6 +6953,330 @@ try:
 except Exception:
 
     logger.exception('geo_expansion_routes register failed')
+
+
+# ═══════════════════════════════════════════
+# 排名分析 rank-tool API
+# ═══════════════════════════════════════════
+
+@app.get("/api/rank-tool/tasks")
+def api_rank_tool_tasks():
+    """排名分析主列表：按客户聚合。"""
+    include_temp = (request.args.get("include_temp") or "").strip() in ("1", "true", "yes")
+    scope_kwargs = _account_scope_kwargs()
+    rows = db.get_ranking_task_list_with_stats(
+        owner_id=scope_kwargs.get("owner_id"),
+        team_id=scope_kwargs.get("team_id"),
+        include_temp=include_temp,
+    )
+    return jsonify(rows)
+
+
+@app.post("/api/rank-tool/submit")
+def api_rank_tool_submit():
+    """创建排名分析任务。"""
+    data = request.get_json(silent=True) or {}
+    account_id = data.get("accountId")
+    brands = data.get("brands") or []
+    query_date = data.get("queryDate") or ""
+    task_name = data.get("taskName") or ""
+
+    if not account_id:
+        return jsonify({"error": "请选择客户"}), 400
+    if not brands:
+        return jsonify({"error": "请至少添加一个分析品牌"}), 400
+
+    if not _ensure_account_access(account_id):
+        return jsonify({"error": "无权访问该客户"}), 403
+
+    acc = db.get_account(account_id)
+    if not acc:
+        return jsonify({"error": "客户不存在"}), 404
+
+    # 构造 search_task_id
+    if query_date:
+        search_task_id = f"account_{account_id}_{query_date}"
+    else:
+        # 取最近查词日期
+        history = db.get_search_history(account_id)
+        if not history:
+            return jsonify({"error": "该客户尚无查词数据"}), 400
+        search_task_id = f"account_{account_id}_{history[0]}"
+
+    brand_name = brands[0] if len(brands) == 1 else json.dumps(brands, ensure_ascii=False)
+    task_id = str(uuid.uuid4())
+
+    # 获取查词结果数作为 total
+    results = db.get_search_results(account_id, query_date) if query_date else db.get_search_results(account_id)
+    total = len([r for r in results if r.get("success")])
+
+    db.create_ranking_task(task_id, search_task_id, account_id, brand_name, total)
+
+    # 后台执行分析
+    def _run():
+        try:
+            _execute_ranking_analysis(task_id, [], brands)
+        except Exception as exc:
+            app.logger.exception("[rank-tool] task=%s 分析异常", task_id)
+            db.update_ranking_task(task_id, status="failed", error_message=str(exc)[:500])
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    return jsonify({
+        "taskId": task_id,
+        "status": "running",
+        "total": total,
+        "message": "排名分析任务已创建，正在后台执行",
+    })
+
+
+@app.get("/api/rank-tool/progress/<task_id>")
+def api_rank_tool_progress(task_id):
+    """获取排名分析任务进度。"""
+    task = db.get_ranking_task(task_id)
+    if not task:
+        return jsonify({"error": "任务不存在"}), 404
+
+    after = int(request.args.get("after") or 0)
+    recent = db.get_recent_ranking_results(task_id, after)
+
+    return jsonify({
+        "taskId": task_id,
+        "status": task.get("status"),
+        "total": task.get("total", 0),
+        "done": task.get("done", 0),
+        "skipped": task.get("skipped", 0),
+        "hit": task.get("hit", 0),
+        "recentResults": recent,
+    })
+
+
+@app.get("/api/rank-tool/results/<task_id>")
+def api_rank_tool_results(task_id):
+    """获取排名分析结果。"""
+    task = db.get_ranking_task(task_id)
+    if not task:
+        return jsonify({"error": "任务不存在"}), 404
+
+    results = db.get_ranking_results(task_id)
+    return jsonify({
+        "taskId": task_id,
+        "status": task.get("status"),
+        "total": task.get("total", 0),
+        "done": task.get("done", 0),
+        "results": results,
+    })
+
+
+@app.get("/api/rank-tool/history")
+def api_rank_tool_history():
+    """排名分析历史列表。"""
+    account_id = request.args.get("accountId", type=int)
+    limit = request.args.get("limit", 100, type=int)
+    scope_kwargs = _account_scope_kwargs()
+
+    rows = db.get_ranking_history_list(
+        account_id=account_id,
+        owner_id=scope_kwargs.get("owner_id"),
+        team_id=scope_kwargs.get("team_id"),
+        limit=limit,
+    )
+    return jsonify(rows)
+
+
+@app.get("/api/rank-tool/trends")
+def api_rank_tool_trends():
+    """品牌排名趋势。"""
+    brand_name = (request.args.get("brand_name") or "").strip()
+    if not brand_name:
+        return jsonify([])
+    trends = db.get_ranking_trends(brand_name)
+    return jsonify(trends)
+
+
+@app.get("/api/rank-tool/brands")
+def api_rank_tool_brands():
+    """可用品牌列表。"""
+    scope_kwargs = _account_scope_kwargs()
+    brands = db.get_ranking_brands(
+        owner_id=scope_kwargs.get("owner_id"),
+        team_id=scope_kwargs.get("team_id"),
+    )
+    return jsonify(brands)
+
+
+@app.get("/api/rank-tool/running")
+def api_rank_tool_running():
+    """当前运行中的排名分析任务。"""
+    scope_kwargs = _account_scope_kwargs()
+    task = db.get_running_ranking_task(
+        owner_id=scope_kwargs.get("owner_id"),
+        team_id=scope_kwargs.get("team_id"),
+    )
+    return jsonify(task or {})
+
+
+@app.post("/api/rank-tool/cancel/<task_id>")
+def api_rank_tool_cancel(task_id):
+    """取消排名分析任务。"""
+    task = db.get_ranking_task(task_id)
+    if not task:
+        return jsonify({"error": "任务不存在"}), 404
+    db.update_ranking_task(task_id, status="failed", error_message="用户取消")
+    return jsonify({"ok": True, "message": "任务已取消"})
+
+
+@app.post("/api/rank-tool/continue/<task_id>")
+def api_rank_tool_continue(task_id):
+    """继续排名分析任务（增量补充）。"""
+    result = supplement_ranking_task(task_id)
+    return jsonify(result)
+
+
+@app.post("/api/rank-tool/rerun/<task_id>")
+def api_rank_tool_rerun(task_id):
+    """重新执行排名分析任务。"""
+    task = db.get_ranking_task(task_id)
+    if not task:
+        return jsonify({"error": "任务不存在"}), 404
+
+    # 删除旧结果
+    db.delete_ranking_task(task_id)
+
+    # 重新创建
+    account_id = task.get("accountId") or task.get("account_id")
+    search_task_id = task.get("searchTaskId") or task.get("search_task_id") or ""
+    brand_name = task.get("brand_name") or ""
+    brands = _parse_brand_list(brand_name)
+
+    search_date = db._extract_search_date(search_task_id)
+    results = db.get_search_results(account_id, search_date) if search_date else db.get_search_results(account_id)
+    total = len([r for r in results if r.get("success")])
+
+    new_task_id = str(uuid.uuid4())
+    db.create_ranking_task(new_task_id, search_task_id, account_id, brand_name, total)
+
+    def _run():
+        try:
+            _execute_ranking_analysis(new_task_id, [], brands)
+        except Exception as exc:
+            app.logger.exception("[rank-tool] rerun task=%s 异常", new_task_id)
+            db.update_ranking_task(new_task_id, status="failed", error_message=str(exc)[:500])
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    return jsonify({
+        "taskId": new_task_id,
+        "status": "running",
+        "total": total,
+        "message": "任务已重新创建",
+    })
+
+
+@app.get("/api/rank-tool/account-history/<int:account_id>")
+def api_rank_tool_account_history(account_id):
+    """某客户的排名分析历史。"""
+    if not _ensure_account_access(account_id):
+        return jsonify({"error": "无权访问"}), 403
+    rows = db.get_ranking_history_by_account(account_id)
+    return jsonify(rows)
+
+
+@app.get("/api/rank-tool/export/<task_id>")
+def api_rank_tool_export(task_id):
+    """导出排名分析 CSV。"""
+    import csv as _csv
+    task = db.get_ranking_task(task_id)
+    if not task:
+        return jsonify({"error": "任务不存在"}), 404
+
+    account_id = task.get("accountId") or task.get("account_id")
+    records = db.get_account_ranking_records(account_id, limit=5000)
+
+    output = io.StringIO()
+    output.write('\ufeff')
+    writer = _csv.writer(output)
+    writer.writerow(["关键词", "平台", "品牌排名", "品牌出现次数", "是否跳过", "错误信息", "分析时间"])
+    for r in records:
+        writer.writerow([
+            r.get("keyword", ""),
+            r.get("model", ""),
+            r.get("brand_rank") or "-",
+            r.get("brand_frequency", 0),
+            "是" if r.get("skipped") else "否",
+            r.get("error", ""),
+            r.get("task_created_at", ""),
+        ])
+
+    resp = Response(output.getvalue(), mimetype="text/csv;charset=utf-8")
+    resp.headers["Content-Disposition"] = f"attachment; filename=ranking_{task_id}.csv"
+    return resp
+
+
+@app.get("/api/rank-tool/export-account/<int:account_id>")
+def api_rank_tool_export_account(account_id):
+    """按客户导出排名分析 CSV。"""
+    import csv as _csv
+    if not _ensure_account_access(account_id):
+        return jsonify({"error": "无权访问"}), 403
+
+    records = db.get_account_ranking_records(account_id, limit=10000)
+
+    output = io.StringIO()
+    output.write('\ufeff')
+    writer = _csv.writer(output)
+    writer.writerow(["关键词", "平台", "品牌排名", "品牌出现次数", "是否跳过", "错误信息", "分析时间"])
+    for r in records:
+        writer.writerow([
+            r.get("keyword", ""),
+            r.get("model", ""),
+            r.get("brand_rank") or "-",
+            r.get("brand_frequency", 0),
+            "是" if r.get("skipped") else "否",
+            r.get("error", ""),
+            r.get("task_created_at", ""),
+        ])
+
+    resp = Response(output.getvalue(), mimetype="text/csv;charset=utf-8")
+    resp.headers["Content-Disposition"] = f"attachment; filename=ranking_account_{account_id}.csv"
+    return resp
+
+
+@app.post("/api/rank-tool/delete/<task_id>")
+def api_rank_tool_delete(task_id):
+    """删除排名分析任务。"""
+    db.delete_ranking_task(task_id)
+    return jsonify({"ok": True, "message": "任务已删除"})
+
+
+@app.post("/api/rank-tool/retry/<task_id>")
+def api_rank_tool_retry(task_id):
+    """重试排名分析任务。"""
+    return api_rank_tool_rerun(task_id)
+
+
+# ── 排名分析详情接口 ──
+
+@app.get("/api/rank-tool/detail/<int:account_id>")
+def api_rank_tool_detail(account_id):
+    """获取某客户的排名分析详情（含关键词数据和历史）。"""
+    if not _ensure_account_access(account_id):
+        return jsonify({"error": "无权访问"}), 403
+    detail = db.get_ranking_detail_by_account(account_id)
+    if not detail:
+        return jsonify({"error": "客户不存在"}), 404
+    return jsonify(detail)
+
+
+@app.get("/api/rank-tool/summary/<int:account_id>")
+def api_rank_tool_summary(account_id):
+    """获取某客户的排名分析汇总。"""
+    if not _ensure_account_access(account_id):
+        return jsonify({"error": "无权访问"}), 403
+    summary = db.get_ranking_account_summary(account_id)
+    if not summary:
+        return jsonify({"error": "客户不存在"}), 404
+    return jsonify(summary)
 
 
 

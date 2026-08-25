@@ -192,6 +192,8 @@ export default {
   submitRankingUpload: (formData) => http.post('/ranking/submit-upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
   getRankingProgress: (taskId, after) => http.get(`/rank-tool/progress/${taskId}`, { params: { after } }),
   getRankingResults: (taskId) => http.get(`/rank-tool/results/${taskId}`),
+  getRankingDetail: (accountId) => http.get(`/rank-tool/detail/${accountId}`),
+  getRankingSummary: (accountId) => http.get(`/rank-tool/summary/${accountId}`),
   retryRanking: (taskId) => http.post(`/rank-tool/retry/${taskId}`),
   getRankingHistory: (params = {}) => http.get('/rank-tool/history', { params: { limit: 500, ...params } }),
   getRankingTrends: (brandName) => http.get('/rank-tool/trends', { params: { brand_name: brandName } }),

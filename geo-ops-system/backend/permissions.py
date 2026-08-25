@@ -20,6 +20,7 @@ PAGE_REGISTRY: list[tuple[str, str, str]] = [
     ("keyword-search",      "查词管理",        "业务功能"),
     ("geo-expansion",       "GEO拓词",         "业务功能"),
     ("publish-customers",   "内容发布",        "业务功能"),
+    ("ranking-analysis",    "排名分析",        "业务功能"),
 
     # —— 系统管理 ——（高危）
     ("admin-users",         "账号管理",        "系统管理"),
