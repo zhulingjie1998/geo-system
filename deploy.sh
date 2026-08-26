@@ -8,15 +8,14 @@
 set -e
 
 # ===== 配置（按实际环境修改）=====
-PROJECT_DIR="/www/wwwroot/GEO"                    # 项目根目录
-BACKEND_DIR="$PROJECT_DIR/backend"
-FRONTEND_DIR="$PROJECT_DIR/frontend"
+PROJECT_DIR="/www/wwwroot/GEO"                    # Git 仓库根目录
+SOURCE_DIR="$PROJECT_DIR/geo-ops-system"           # Git 拉取的代码在此子目录
+BACKEND_DIR="$SOURCE_DIR/backend"
+FRONTEND_DIR="$SOURCE_DIR/frontend"
 GIT_REMOTE="origin"
 GIT_BRANCH="main"
 GUNICORN_BIN="/www/server/pyporject_evn/GEO/bin/gunicorn"
 PYTHON_BIN="/www/server/pyporject_evn/GEO/bin/python3"
-NODE_BIN="/usr/bin/node"                           # 如果 node 不在默认 PATH
-PNPM_BIN=""                                        # 如果 pnpm 不在默认 PATH，填完整路径
 # =================================
 
 cd "$PROJECT_DIR"
@@ -29,15 +28,31 @@ echo "============================================"
 echo ""
 
 # ----- 1. 拉取最新代码 -----
-echo "[1/5] 拉取最新代码..."
+echo "[1/6] 拉取最新代码..."
 git fetch "$GIT_REMOTE" "$GIT_BRANCH"
 git reset --hard "$GIT_REMOTE/$GIT_BRANCH"
 echo "  ✅ 代码已更新到最新版本"
 git log --oneline -1
 echo ""
 
-# ----- 2. 安装后端依赖 -----
-echo "[2/5] 检查后端依赖..."
+# ----- 2. 确保 .env 存在 -----
+echo "[2/6] 检查后端 .env 配置..."
+if [ ! -f "$BACKEND_DIR/.env" ]; then
+    # 尝试从旧目录复制
+    if [ -f "$PROJECT_DIR/backend/.env" ]; then
+        cp "$PROJECT_DIR/backend/.env" "$BACKEND_DIR/.env"
+        echo "  ✅ 已从旧目录复制 .env"
+    else
+        echo "  ❌ 未找到 .env，请手动创建 $BACKEND_DIR/.env"
+        exit 1
+    fi
+else
+    echo "  ✅ .env 已存在"
+fi
+echo ""
+
+# ----- 3. 安装后端依赖 -----
+echo "[3/6] 检查后端依赖..."
 cd "$BACKEND_DIR"
 if [ -f "requirements.txt" ]; then
     "$PYTHON_BIN" -m pip install -r requirements.txt -q 2>/dev/null || true
@@ -47,16 +62,14 @@ else
 fi
 echo ""
 
-# ----- 3. 构建前端 -----
-echo "[3/5] 构建前端..."
+# ----- 4. 构建前端 -----
+echo "[4/6] 构建前端..."
 cd "$FRONTEND_DIR"
 
 # 检查 node_modules 是否存在
 if [ ! -d "node_modules" ]; then
     echo "  安装前端依赖..."
-    if [ -n "$PNPM_BIN" ]; then
-        "$PNPM_BIN" install
-    elif command -v pnpm &>/dev/null; then
+    if command -v pnpm &>/dev/null; then
         pnpm install
     elif [ -f "pnpm-lock.yaml" ]; then
         npm install -g pnpm 2>/dev/null || true
@@ -69,23 +82,21 @@ fi
 # 构建
 if command -v pnpm &>/dev/null; then
     pnpm build
-elif [ -n "$PNPM_BIN" ]; then
-    "$PNPM_BIN" build
 else
     npx vite build
 fi
 echo "  ✅ 前端构建完成"
 echo ""
 
-# ----- 4. 复制 dist 到 backend/static -----
-echo "[4/5] 部署前端静态文件..."
+# ----- 5. 复制 dist 到 backend/static -----
+echo "[5/6] 部署前端静态文件..."
 rm -rf "$BACKEND_DIR/static"
 cp -r "$FRONTEND_DIR/dist" "$BACKEND_DIR/static"
 echo "  ✅ 静态文件已部署到 backend/static"
 echo ""
 
-# ----- 5. 重启 Gunicorn -----
-echo "[5/5] 重启 Gunicorn..."
+# ----- 6. 重启 Gunicorn -----
+echo "[6/6] 重启 Gunicorn..."
 cd "$BACKEND_DIR"
 
 # 杀掉旧的 gunicorn 进程
@@ -117,8 +128,4 @@ echo "============================================"
 echo ""
 echo "验证接口:"
 curl -s http://127.0.0.1:7006/api/auth/me || echo "  (接口未响应)"
-echo ""
-echo "当前版本:"
-git log --oneline -1
-git describe --tags 2>/dev/null || echo "  (无标签)"
 echo ""

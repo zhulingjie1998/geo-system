@@ -11,3 +11,5 @@
   -> No history found for task_id=09083d21-f46
 [2026-08-24 11:33:25] _update_history_duration called: task_id=d19a6cf3-5ac
   -> No history found for task_id=d19a6cf3-5ac
+[2026-08-25 11:32:23] _update_history_duration called: task_id=9c7e00e8-e3d
+  -> No history found for task_id=9c7e00e8-e3d
