@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import LoginPage from '../views/LoginPage.vue'
 import DashboardLayout from '../layouts/DashboardLayout.vue'
 import PublishLayout from '../layouts/PublishLayout.vue'
+import EffectAnalysisLayout from '../layouts/EffectAnalysisLayout.vue'
 import HomePage from '../views/HomePage.vue'
 import AccountManagementPage from '../views/AccountManagementPage.vue'
 import KeywordSearchPage from '../views/KeywordSearchPage.vue'
@@ -24,6 +25,15 @@ import PublishAiWritePage from '../views/PublishAiWritePage.vue'
 import PublishInstructionPage from '../views/PublishInstructionPage.vue'
 import GeoExpansionPage from '../views/GeoExpansionPage.vue'
 import RankingAnalysisPage from '../views/RankingAnalysisPage.vue'
+// 效果分析页面
+import CustomerEffectPage from '../views/effect-analysis/CustomerEffectPage.vue'
+import OnListKeywordsPage from '../views/effect-analysis/OnListKeywordsPage.vue'
+import OfflineKeywordsPage from '../views/effect-analysis/OfflineKeywordsPage.vue'
+import OfflineWarningPage from '../views/effect-analysis/OfflineWarningPage.vue'
+import RankingFluctuationPage from '../views/effect-analysis/RankingFluctuationPage.vue'
+import PlatformComparisonPage from '../views/effect-analysis/PlatformComparisonPage.vue'
+import CompetitorAnalysisPage from '../views/effect-analysis/CompetitorAnalysisPage.vue'
+import CitationSourcePage from '../views/effect-analysis/CitationSourcePage.vue'
 import api from '../api'
 import { getAuthState, setAuthState, resetAuthState } from '../utils/auth'
 
@@ -71,6 +81,23 @@ const routes = [
       { path: 'prompts', name: 'PublishPrompts', component: PublishInstructionPage },
       { path: 'media', name: 'PublishMedia', redirect: '/publish/home' },
       { path: 'articles', name: 'PublishArticles', redirect: '/publish/content-library' },
+    ]
+  },
+  // ========== GEO 效果分析系统（独立布局）==========
+  {
+    path: '/effect-analysis',
+    component: EffectAnalysisLayout,
+    meta: { requiresAuth: true, title: 'GEO 效果分析' },
+    children: [
+      { path: '', redirect: '/effect-analysis/customer-effect' },
+      { path: 'customer-effect', name: 'EaCustomerEffect', component: CustomerEffectPage },
+      { path: 'on-list-keywords', name: 'EaOnListKeywords', component: OnListKeywordsPage },
+      { path: 'offline-keywords', name: 'EaOfflineKeywords', component: OfflineKeywordsPage },
+      { path: 'offline-warning', name: 'EaOfflineWarning', component: OfflineWarningPage },
+      { path: 'ranking-fluctuation', name: 'EaRankingFluctuation', component: RankingFluctuationPage },
+      { path: 'platform-comparison', name: 'EaPlatformComparison', component: PlatformComparisonPage },
+      { path: 'competitor-analysis', name: 'EaCompetitorAnalysis', component: CompetitorAnalysisPage },
+      { path: 'citation-source', name: 'EaCitationSource', component: CitationSourcePage },
     ]
   },
   { path: '/', redirect: '/dashboard/home' },
@@ -145,6 +172,14 @@ function canAccessPage(pageKey) {
 // 动态切换 document.title（外部页用独立标题）
 const TITLE_MAP = {
   Login: '登录 · GEO 运营系统',
+  EaCustomerEffect: '客户效果分析 · GEO 效果分析',
+  EaOnListKeywords: '上榜词 · GEO 效果分析',
+  EaOfflineKeywords: '不在线词 · GEO 效果分析',
+  EaOfflineWarning: '掉线预警 · GEO 效果分析',
+  EaRankingFluctuation: '排名波动 · GEO 效果分析',
+  EaPlatformComparison: '平台对比 · GEO 效果分析',
+  EaCompetitorAnalysis: '竞品分析 · GEO 效果分析',
+  EaCitationSource: '引用源分析 · GEO 效果分析',
 }
 const DEFAULT_TITLE = 'GEO 运营系统'
 

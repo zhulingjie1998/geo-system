@@ -63,6 +63,15 @@
           </RouterLink>
         </el-tooltip>
 
+        <!-- 效果分析模块（独立系统页，新窗口打开） -->
+        <div class="nav-section-divider" v-if="canAccess('publish') || canAccess('home')"></div>
+        <el-tooltip content="效果分析" placement="right" :disabled="!collapsed || isMobile || sidebarHover" :show-after="200">
+          <a v-if="canAccess('publish') || canAccess('home')" href="/effect-analysis" target="_blank" rel="noopener" class="nav-item nav-item-highlight nav-item-teal">
+            <el-icon><DataAnalysis /></el-icon>
+            <span>效果分析</span>
+          </a>
+        </el-tooltip>
+
         <!-- 内容发布模块 -->
         <div class="nav-section-divider" v-if="canAccess('publish')"></div>
         <el-tooltip content="内容发布" placement="right" :disabled="!collapsed || isMobile || sidebarHover" :show-after="200">
@@ -151,7 +160,7 @@
 <script setup>
 import { computed, ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
-import { House, User, UserFilled, MagicStick, Setting, Menu, Fold, Expand, Promotion, Search, TrendCharts } from '@element-plus/icons-vue'
+import { House, User, UserFilled, MagicStick, Setting, Menu, Fold, Expand, Promotion, Search, TrendCharts, DataAnalysis } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import api from '../api'
 import { resetAuthState } from '../utils/auth'
@@ -428,6 +437,19 @@ async function handleLogout() {
 }
 .nav-item-highlight .el-icon {
   color: #a78bfa;
+}
+
+/* 效果分析入口 - 青色高亮（与内容发布紫色区分） */
+.nav-item-teal {
+  background: linear-gradient(135deg, rgba(45, 212, 191, 0.15), rgba(20, 184, 166, 0.1));
+  border-color: rgba(45, 212, 191, 0.25);
+}
+.nav-item-teal:hover {
+  background: linear-gradient(135deg, rgba(45, 212, 191, 0.28), rgba(20, 184, 166, 0.2));
+  border-color: rgba(45, 212, 191, 0.45);
+}
+.nav-item-teal .el-icon {
+  color: #2dd4bf;
 }
 
 /* 导航分组分隔线 */
