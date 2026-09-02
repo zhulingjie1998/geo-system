@@ -198,56 +198,12 @@
     <!-- Excel 导入知识库弹窗 -->
     <KbExcelImportDialog v-model="excelImportOpen" @done="onExcelImportDone" />
 
-    <!-- 创建知识库弹窗 -->
-    <el-dialog v-model="showCreateDialog" title="创建知识库" width="min(620px, 92vw)" top="8vh" :close-on-click-modal="false" class="create-kb-dialog">
-      <div class="ckb-body">
-        <div class="ckb-field">
-          <label>选择客户</label>
-          <el-select v-model="createForm.accountId" placeholder="请选择客户" filterable style="width:100%" :disabled="true">
-            <el-option v-for="acc in accountOptions" :key="acc.id" :label="acc.companyName || acc.name" :value="acc.id" />
-          </el-select>
-        </div>
-
-        <div class="ckb-field">
-          <label>基础资料 <span class="ckb-req">*</span></label>
-          <div v-if="createForm.historySourceIds.length" class="ckb-history-list">
-            <div v-for="s in historySources" :key="s.id" class="ckb-history-item"
-                 :class="{ checked: createForm.historySourceIds.includes(s.id), disabled: s.parser_status !== 'done' }">
-              <input type="checkbox" :value="s.id" v-model="createForm.historySourceIds"
-                     :disabled="s.parser_status !== 'done'" />
-              <span class="ckb-history-name" :title="s.file_name">{{ s.file_name }}</span>
-              <el-tag size="small" :type="srcStatusType(s.parser_status)" effect="plain">{{ srcStatusText(s.parser_status) }}</el-tag>
-              <span class="ckb-history-size">{{ formatFileSize(s.file_size) }}</span>
-            </div>
-          </div>
-          <div v-else class="ckb-no-history">暂无历史资料，请上传新文件</div>
-          <el-upload drag multiple :auto-upload="false" :show-file-list="false" :on-change="onCreateFileChange" :on-remove="onCreateFileRemove" class="ckb-upload">
-            <el-icon :size="24"><Upload /></el-icon>
-            <div class="ckb-upload-text">拖拽文件到此处，或<em>点击上传</em></div>
-            <div class="ckb-upload-types">PDF / Word / Excel / 图片 / TXT</div>
-          </el-upload>
-          <div v-if="createForm.files.length" class="ckb-file-list">
-            <div v-for="f in createForm.files" :key="f.uid" class="ckb-file-item">
-              <el-icon :size="14"><Document /></el-icon>
-              <span class="ckb-file-name" :title="f.name">{{ f.name }}</span>
-              <span class="ckb-file-size">{{ formatFileSize(f.size) }}</span>
-              <el-button link size="small" type="danger" @click="onCreateFileRemove(f)">×</el-button>
-            </div>
-          </div>
-        </div>
-
-        <div class="ckb-field">
-          <label>补充说明</label>
-          <el-input v-model="createForm.instruction" type="textarea" :rows="2" placeholder="可留空。默认按 GEO 10 模块标准模板生成。如需特殊强调可在此说明。" />
-        </div>
-      </div>
-      <template #footer>
-        <el-button @click="showCreateDialog = false">取消</el-button>
-        <el-button type="primary" :loading="creatingKb" :disabled="!canCreate" @click="submitCreateKb">
-          <el-icon style="margin-right:4px"><Notebook /></el-icon> 生成知识库
-        </el-button>
-      </template>
-    </el-dialog>
+    <!-- 创建知识库弹窗（使用统一组件） -->
+    <KbCreateKnowledgeDialog
+      v-model="showCreateDialog"
+      :default-account-id="accountId"
+      @created="onKbCreated"
+    />
 
     <!-- 添加模块弹窗 -->
     <el-dialog v-model="showAddModule" title="添加知识库模块" width="min(560px, 92vw)" top="8vh" :close-on-click-modal="false" class="add-mod-dialog">
@@ -303,12 +259,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft, ArrowRight, Download, Edit, Check, Plus,
-  Notebook, Document, DocumentCopy, Upload, User,
+  Document, DocumentCopy, Upload,
   Files, Picture, DataAnalysis, Loading
 } from '@element-plus/icons-vue'
 import api from '../api'
 import publishApi from '@/api/publish'
 import KbExcelImportDialog from '@/components/KbExcelImportDialog.vue'
+import KbCreateKnowledgeDialog from '@/components/KbCreateKnowledgeDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -338,126 +295,15 @@ function onExcelImportDone() {
   loadDetailData()
 }
 
-// ===== 创建知识库弹窗 =====
+// ===== 创建知识库弹窗（统一组件） =====
 const showCreateDialog = ref(false)
-const creatingKb = ref(false)
-const accountOptions = ref([])
-const historySources = ref([])
-const createForm = reactive({
-  accountId: null,
-  kbName: '',
-  remark: '',
-  moduleConfirm: true,
-  files: [],
-  historySourceIds: [],
-  instruction: '',
-})
-const canCreate = computed(() =>
-  !!createForm.accountId
-  && (createForm.historySourceIds.length > 0 || createForm.files.length > 0)
-)
 function openCreateDialog() {
-  createForm.accountId = accountId.value
-  createForm.kbName = accountName.value ? `${accountName.value} 知识库` : ''
-  createForm.remark = ''
-  createForm.moduleConfirm = true
-  createForm.files = []
-  createForm.historySourceIds = []
-  createForm.instruction = ''
-  // 加载历史资料
-  loadHistorySources(accountId.value)
   showCreateDialog.value = true
 }
-async function loadHistorySources(acctId) {
-  if (!acctId) { historySources.value = []; return }
-  try {
-    const r = await publishApi.kbListSources(acctId, null)
-    historySources.value = (r?.items || []).filter(s => !s.kb_version_id)
-    // 默认勾选已解析的
-    createForm.historySourceIds = historySources.value
-      .filter(s => s.parser_status === 'done')
-      .map(s => s.id)
-  } catch {
-    historySources.value = []
-  }
-}
-function onCreateFileChange(file) {
-  createForm.files.push(file)
-}
-function onCreateFileRemove(file) {
-  createForm.files = createForm.files.filter(f => f.uid !== file.uid)
-}
-async function submitCreateKb() {
-  if (!createForm.accountId) { ElMessage.warning('请选择客户'); return }
-  if (!canCreate.value) { ElMessage.warning('至少需要 1 份基础资料'); return }
-
-  creatingKb.value = true
-  const acctId = createForm.accountId
-  const instruction = createForm.instruction
-  const newFiles = createForm.files.map(x => x.raw).filter(Boolean)
-  const historyIds = [...createForm.historySourceIds]
-  let allSourceIds = [...historyIds]
-
-  try {
-    // 1. 如果有新文件要上传 → 走上传流程（后端自动触发智能识别）
-    if (newFiles.length) {
-      window.dispatchEvent(new CustomEvent('kb-task-start', {
-        detail: {
-          phase: 'upload', percent: 0, accountId: acctId,
-          hint: `${accountName.value} · 知识库 上传素材中 0%`,
-          text: `准备上传 ${newFiles.length} 份新素材...`,
-        },
-      }))
-      const upR = await publishApi.kbUploadSources(acctId, newFiles, null, (pct) => {
-        window.dispatchEvent(new CustomEvent('kb-task-progress', {
-          detail: { phase: 'upload', percent: pct, hint: `${accountName.value} · 知识库 上传素材中 ${pct}%` },
-        }))
-      })
-      const newIds = (upR.saved || []).map(x => x.id)
-      if (!newIds.length) throw new Error('新素材上传失败')
-      allSourceIds = allSourceIds.concat(newIds)
-
-      // 后端自动启动了智能识别离线任务，显示识别进度
-      const recognizeTasks = upR.recognize_tasks || []
-      if (recognizeTasks.length) {
-        const firstTask = recognizeTasks[0]
-        const fileNames = recognizeTasks.map(t => t.file_name).join('、')
-        window.dispatchEvent(new CustomEvent('kb-task-start', {
-          detail: {
-            phase: 'llm', taskId: firstTask.task_id, accountId: acctId,
-            taskType: 'recognize',
-            hint: `${accountName.value} · 智能识别中`,
-            text: `正在识别 ${recognizeTasks.length} 份资料：${fileNames}`,
-          },
-        }))
-        ElMessage.info('资料上传完成，正在智能识别中，完成后右下角自动通知')
-        // 关闭弹窗，让用户等待识别完成后再生成
-        showCreateDialog.value = false
-        return
-      }
-    }
-
-    // 2. 提交生成
-    const genR = await publishApi.kbGenerate(acctId, instruction, allSourceIds)
-    if (!genR.task_id) throw new Error('未拿到 task_id')
-
-    // 3. 关闭弹窗，启动浮动任务窗口
-    showCreateDialog.value = false
-    window.dispatchEvent(new CustomEvent('kb-task-start', {
-      detail: {
-        phase: 'llm', taskId: genR.task_id, accountId: acctId,
-        hint: `${accountName.value} · 知识库 生成中`,
-        text: `素材 ${allSourceIds.length} 份（历史 ${historyIds.length} + 新 ${newFiles.length}）已提交`,
-      },
-    }))
-    ElMessage.info('生成任务已提交，可继续做其它操作，完成后右下角自动通知')
-  } catch (e) {
-    const msg = e.response?.data?.error || e.message || String(e)
-    ElMessage.error('生成失败：' + msg)
-    window.dispatchEvent(new CustomEvent('kb-task-failed', { detail: { error: msg } }))
-  } finally {
-    creatingKb.value = false
-  }
+/** 知识库创建/上传完成回调：刷新页面数据 */
+function onKbCreated(payload) {
+  // 刷新资料列表和版本信息
+  loadDetailData()
 }
 
 // 添加模块弹窗
@@ -558,7 +404,6 @@ async function loadDetailData() {
   try {
     const accounts = await api.listAccounts()
     const list = Array.isArray(accounts) ? accounts : []
-    accountOptions.value = list
 
     const acc = list.find(a => a.id === accountId.value)
     if (acc) {

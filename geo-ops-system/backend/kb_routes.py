@@ -578,10 +578,10 @@ def register(app):
         _require_login()
         try:
             data = request.get_json(silent=True) or {}
-            mode = (data.get("mode") or db.get_setting("llm_api_mode", "gemini") or "gemini").strip().lower()
+            mode = (data.get("mode") or db.get_setting("llm_api_mode", "qwen") or "qwen").strip().lower()
             prompt = data.get("prompt") or "请只返回一句话：连接测试成功"
             settings = db.get_all_settings()
-            model = data.get("model") or settings.get(f"{mode}_model_name") or settings.get("llm_model_name") or "gemini-3-flash-preview"
+            model = data.get("model") or settings.get(f"{mode}_model_name") or settings.get("llm_model_name") or "qwen-plus"
             text = svc.call_llm_by_settings(settings, prompt, max_tokens=80, timeout=30, mode=mode, model=model)
             return jsonify({"ok": True, "provider": mode, "model": model, "text": text[:500]})
         except Exception as e:

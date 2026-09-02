@@ -344,21 +344,78 @@ def reparse_source(src_id: int) -> dict:
 # 智能识别（Qwen3.7）
 # ════════════════════════════════════════════════════════
 
+import re as _re
+
+def _clean_ai_output(text: str) -> str:
+    """清理 AI 模型输出的头尾套话，只保留纯净内容。"""
+    lines = text.strip().split('\n')
+    
+    # 需要移除的开头模式
+    start_patterns = [
+        r'^以下是.*[识别|整理|结果]',
+        r'^以下是对.*',
+        r'^根据.*原文档',
+        r'^\[.*识别.*\]',
+        r'^---+\s*$',
+        r'^\*\*来源[：:]\*\*',
+        r'^\*\*（来源[：:].*\）\*\*',
+        r'^\*（来源[：:].*\）\*',
+        r'^欢迎随时提出',
+        r'^如需进一步生成',
+    ]
+    
+    # 需要移除的结尾模式
+    end_patterns = [
+        r'^欢迎随时提出',
+        r'^如需进一步生成',
+        r'^以上是.*识别',
+        r'^希望.*对您有帮助',
+        r'^---+\s*$',
+        r'^\[.*结束.*\]',
+    ]
+    
+    # 移除开头套话
+    while lines:
+        stripped = lines[0].strip()
+        if not stripped:
+            lines.pop(0)
+            continue
+        matched = any(_re.match(p, stripped, _re.IGNORECASE) for p in start_patterns)
+        if matched:
+            lines.pop(0)
+        else:
+            break
+    
+    # 移除结尾套话
+    while len(lines) > 1:
+        stripped = lines[-1].strip()
+        if not stripped:
+            lines.pop()
+            continue
+        matched = any(_re.match(p, stripped, _re.IGNORECASE) for p in end_patterns)
+        if matched:
+            lines.pop()
+        else:
+            break
+    
+    result = '\n'.join(lines).strip()
+    return result
+
 _RECOGNIZE_SYSTEM_PROMPT = (
-    "你是一个专业的文档智能识别助手。请对用户提供的原始文本进行结构化识别和整理，输出清晰易读的文本内容。\n"
+    "你是一个专业的文档智能识别助手。请对用户提供的原始文本进行结构化识别和整理。\n"
     "要求：\n"
-    "1. 识别并提取文本中的所有关键信息，包括但不限于：公司名称、品牌、产品、数据、时间、地点、人物等\n"
-    "2. 保持原文的核心语义，不要编造或添加原文中没有的信息\n"
-    "3. 对杂乱或格式不规范的文本进行整理，使其结构清晰（可使用标题、列表等）\n"
-    "4. 如果原文包含表格数据，用 markdown 表格格式输出\n"
-    "5. 如果原文包含数值数据，保留精确数值\n"
-    "6. 用中文输出\n"
+    "1. 直接输出识别整理后的正文内容，不要添加任何开头、结尾说明或总结性文字\n"
+    "2. 识别并提取文本中的所有关键信息，包括但不限于：公司名称、品牌、产品、数据、时间、地点、人物等\n"
+    "3. 保持原文的核心语义，不要编造或添加原文中没有的信息\n"
+    "4. 对杂乱或格式不规范的文本进行整理，使其结构清晰（可使用标题、列表等）\n"
+    "5. 如果原文包含表格数据，用 markdown 表格格式输出\n"
+    "6. 如果原文包含数值数据，保留精确数值\n"
+    "7. 用中文输出\n"
+    "8. 严禁输出「以下是对...」、「欢迎随时提出」等套话，只输出纯净内容\n"
 )
 
 _RECOGNIZE_USER_TEMPLATE = (
-    "请对以下原始文档文本进行智能识别和结构化整理：\n\n"
-    "--- 原始文本开始 ---\n{raw_text}\n--- 原始文本结束 ---\n\n"
-    "请输出识别整理后的文本内容。"
+    "{raw_text}"
 )
 
 
@@ -420,6 +477,9 @@ def _recognize_async(src_id: int, raw_text: str, file_name: str) -> None:
         )
         if not ai_text.strip():
             raise RuntimeError("Qwen 返回空文本")
+
+        # 清理 AI 输出的头尾套话
+        ai_text = _clean_ai_output(ai_text)
 
         conn = db.get_conn()
         db._exec(conn,
@@ -540,7 +600,15 @@ def proofread_against_rules(kb_id: int) -> dict:
 
     prompt = _PROOFREAD_PROMPT.format(rules_block=rules_block, kb_content=content)
     settings = db.get_all_settings()
-    raw = llm_claude.call_claude(settings, user_prompt=prompt, max_tokens=8000, timeout=300)
+    # 使用通义千问进行合规校对
+    raw = call_llm_by_settings(
+        settings,
+        user_prompt=prompt,
+        max_tokens=8000,
+        timeout=300,
+        mode="qwen",
+        model=settings.get("qwen_model_name") or "qwen-plus",
+    )
     parsed = _parse_json_loose(raw) or {}
 
     findings = []
@@ -880,10 +948,10 @@ def _merge_source_texts(source_ids: list[int], max_total_chars: int = 200_000) -
 def call_llm_by_settings(settings: dict, user_prompt: str, *, max_tokens: int, timeout: int,
                         mode: Optional[str] = None, model: Optional[str] = None) -> str:
     """按系统设置中的 llm_api_mode / llm_* 配置发起一次最小 LLM 请求。"""
-    mode = (mode or settings.get("llm_api_mode") or "gemini").strip().lower()
+    mode = (mode or settings.get("llm_api_mode") or "qwen").strip().lower()  # 默认使用通义千问
     base_url = (settings.get(f"{mode}_base_url") or settings.get("llm_base_url", "")).strip().rstrip("/")
     api_key = settings.get(f"{mode}_api_key") or settings.get("llm_api_key", "")
-    model = model or settings.get(f"{mode}_model_name") or settings.get("llm_model_name") or "gemini-3-flash-preview"
+    model = model or settings.get(f"{mode}_model_name") or settings.get("llm_model_name") or "qwen-plus"  # 默认通义千问
     timeout = int(timeout or settings.get("llm_timeout") or 300)
 
     if not api_key:
@@ -903,28 +971,39 @@ def call_llm_by_settings(settings: dict, user_prompt: str, *, max_tokens: int, t
             return f"{url}/chat/completions"
         return f"{url}/v1/chat/completions"
 
-    def _normalize_gemini_base_url(url: str) -> str:
-        marker = "/v1beta/models/"
-        if marker in url:
-            return url.split(marker, 1)[0]
+    def _normalize_claude_base_url(url: str) -> str:
+        """Claude API: 去掉路径后缀，只保留 base"""
+        for suffix in ["/v1/messages", "/messages"]:
+            if url.endswith(suffix):
+                return url[:-len(suffix)]
         return url
 
     with httpx.Client(timeout=timeout, trust_env=False) as client:
-        if mode == "gemini":
-            base_url = _normalize_gemini_base_url(base_url)
-            url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
+        if mode == "claude":
+            base_url = _normalize_claude_base_url(base_url)
+            url = f"{base_url}/v1/messages"
             payload = {
-                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens},
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": user_prompt}],
             }
-            resp = client.post(url, json=payload)
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+            resp = client.post(url, headers=headers, json=payload)
             if resp.status_code >= 400:
-                raise RuntimeError(f"Gemini 请求失败 HTTP {resp.status_code}: {(resp.text or '')[:400]}")
+                raise RuntimeError(f"Claude 请求失败 HTTP {resp.status_code}: {(resp.text or '')[:400]}")
             data = resp.json()
-            text = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [{}])[0].get("text", "")
+            content_blocks = data.get("content") or []
+            text = ""
+            for block in content_blocks:
+                if block.get("type") == "text":
+                    text += block.get("text", "")
             text = (text or "").strip()
             if not text:
-                raise RuntimeError(f"Gemini 返回为空: {data!r}")
+                raise RuntimeError(f"Claude 返回为空: {data!r}")
             return text
 
         url = _normalize_openai_base_url(base_url)
@@ -1023,8 +1102,9 @@ def generate_kb_first(account_id: int, instruction: str, source_ids: list[int],
     )
 
     settings = db.get_all_settings()
-    mode = (settings.get("llm_api_mode") or "gemini").strip().lower()
-    model = settings.get(f"{mode}_model_name") or settings.get("llm_model_name") or "gemini-3-flash-preview"
+    # 强制使用通义千问（不再依赖数据库 llm_api_mode 设置）
+    mode = "qwen"
+    model = settings.get("qwen_model_name") or settings.get("llm_model_name") or "qwen-plus"
     content = call_llm_by_settings(
         settings,
         prompt,
@@ -1230,11 +1310,14 @@ def expand_kb(prev_kb_id: int, new_instruction: str,
         start_no=start_no,
     )
     settings = db.get_all_settings()
-    new_modules = llm_claude.call_claude(
+    # 使用通义千问进行知识库扩充
+    new_modules = call_llm_by_settings(
         settings,
         user_prompt=prompt,
         max_tokens=KB_MAX_OUTPUT_TOKENS,
         timeout=900,
+        mode="qwen",
+        model=settings.get("qwen_model_name") or "qwen-plus",
     )
     new_modules = _strip_kb_preamble(new_modules or "")
     combined = (prev["content"] or "").rstrip() + "\n\n" + new_modules.strip() + "\n"
@@ -1284,12 +1367,15 @@ def refine_kb(prev_kb_id: int, new_instruction: str,
     )
 
     settings = db.get_all_settings()
-    model = settings.get("claude_model_name") or "claude-sonnet-4-6"
-    content = llm_claude.call_claude(
+    model = settings.get("qwen_model_name") or "qwen-plus"
+    # 使用通义千问进行知识库优化
+    content = call_llm_by_settings(
         settings,
         user_prompt=prompt,
         max_tokens=KB_MAX_OUTPUT_TOKENS,
         timeout=900,
+        mode="qwen",
+        model=model,
     )
     content = _strip_kb_preamble(content)
 
@@ -1643,8 +1729,15 @@ def _llm_extract_checklist(text: str) -> Optional[dict]:
 ---
 {text}
 ---"""
-    raw = llm_claude.call_claude(settings, user_prompt=prompt,
-                                  max_tokens=8000, timeout=240)
+    # 使用通义千问进行品牌分析
+    raw = call_llm_by_settings(
+        settings,
+        user_prompt=prompt,
+        max_tokens=8000,
+        timeout=240,
+        mode="qwen",
+        model=settings.get("qwen_model_name") or "qwen-plus",
+    )
     if not raw:
         return None
     raw = raw.strip()

@@ -71,6 +71,13 @@ def transaction():
 
 
 def _exec(conn, sql, args=None):
+    # DEBUG: 打印所有 SQL 执行
+    if 'UPDATE search_result' in sql:
+        try:
+            print(f"[DEBUG-_EXEC] sql={sql}", flush=True)
+            print(f"[DEBUG-_EXEC] args={args}", flush=True)
+        except UnicodeEncodeError:
+            print(f"[DEBUG-_EXEC] sql={sql} (args含特殊字符，省略)", flush=True)
     with conn.cursor() as cur:
         cur.execute(sql, args)
         return cur
@@ -154,8 +161,10 @@ def _init_schema(conn):
             attempt INT,
             search_date VARCHAR(255) NOT NULL,
             created_at VARCHAR(255),
+            updated_at VARCHAR(255),
             INDEX idx_sr_task (task_id),
-            INDEX idx_sr_account_date (account_id, search_date)
+            INDEX idx_sr_account_date (account_id, search_date),
+            UNIQUE KEY uk_sr_task_platform_keyword (task_id, platform, keyword(200))
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
 
         """CREATE TABLE IF NOT EXISTS report_info (
@@ -2045,8 +2054,38 @@ def get_search_task(task_id: str) -> Optional[dict]:
         return None
     total = d.get("total_queries") or 0
     completed = d.get("completed_queries") or 0
-    return {
+    source = d.get("source", "internal_manual")
+    # 根据 source 判断是否为重试任务
+    retry_type = None
+    pending_pairs = []
+    if source == "retry_failed":
+        retry_type = "failed"
+        # 查询该账号最新已完成任务的失败记录作为 pendingPairs
+        account_id = d.get("account_id")
+        if account_id:
+            try:
+                # 找到该账号最新的 COMPLETED 任务
+                latest = _fetchone(conn, """
+                    SELECT id FROM search_task 
+                    WHERE account_id=%s AND status='COMPLETED'
+                    ORDER BY created_at DESC LIMIT 1
+                """, (account_id,))
+                if latest:
+                    # 获取该任务的失败记录
+                    rows = _fetchall(conn, """
+                        SELECT keyword, platform, model 
+                        FROM search_result 
+                        WHERE task_id=%s AND success=0
+                    """, (latest["id"],))
+                    pending_pairs = [{"keyword": r["keyword"], "platform": r["platform"], "model": r.get("model", "")} for r in rows]
+            except Exception as e:
+                logger.warning("[get_search_task] 查询retry pendingPairs失败: %s", e)
+    elif source == "retry_continue":
+        retry_type = "continue"
+    
+    result = {
         "taskId": d["id"],
+        "accountId": d.get("account_id"),
         "status": d["status"],
         "total": total,
         "completed": completed,
@@ -2056,11 +2095,15 @@ def get_search_task(task_id: str) -> Optional[dict]:
         "createdAt": d.get("created_at", ""),
         "completedAt": d.get("completed_at", ""),
         "priority": d.get("priority", 7),
-        "source": d.get("source", "internal_manual"),
-        # external_pipeline TIMEOUT 误判修复用：心跳/进度推进时间，判查词是否真活着
+        "source": source,
+        "retryType": retry_type,
         "lastHeartbeat": d.get("last_heartbeat", ""),
         "lastProgressAt": d.get("last_progress_at", ""),
     }
+    # 只有当查到有效的 pendingPairs 时才返回（避免空数组覆盖前端已有的数据）
+    if pending_pairs:
+        result["pendingPairs"] = pending_pairs
+    return result
 
 
 def is_search_cancelled(task_id: str) -> bool:
@@ -2738,8 +2781,15 @@ def cleanup_old_login_attempts(max_age_seconds: int = 3600) -> None:
 # ═══════════════════════════════════════════
 
 def save_search_result(data: dict) -> int:
+    """保存查词结果，支持去重更新（同一 task_id + platform + keyword 只保留最新一条）。
+    
+    Returns:
+        int: 记录的ID（新插入或已更新的）
+    """
     now = _now()
     with transaction() as conn:
+        # 使用 INSERT ... ON DUPLICATE KEY UPDATE 实现去重
+        # 如果 (task_id, platform, keyword) 已存在则更新，否则插入
         cur = _exec(conn,
             """INSERT INTO search_result
                (task_id, account_id, keyword_id, platform, model, keyword,
@@ -2747,7 +2797,19 @@ def save_search_result(data: dict) -> int:
                 success, response_json, answer_text, answer_html, summarys_json,
                 screenshot_url, duration, attempt, error_message,
                 first_attempt_error, rescue_round, search_date, created_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON DUPLICATE KEY UPDATE
+                 success=VALUES(success),
+                 response_json=VALUES(response_json),
+                 answer_text=VALUES(answer_text),
+                 answer_html=VALUES(answer_html),
+                 screenshot_url=VALUES(screenshot_url),
+                 duration=VALUES(duration),
+                 attempt=VALUES(attempt),
+                 error_message=VALUES(error_message),
+                 first_attempt_error=VALUES(first_attempt_error),
+                 rescue_round=VALUES(rescue_round),
+                 updated_at=%s""",
             (
                 data["task_id"], data["account_id"], data.get("keyword_id"),
                 data["platform"], data["model"], data["keyword"],
@@ -2766,9 +2828,38 @@ def save_search_result(data: dict) -> int:
                 (data.get("rescue_round") or "initial")[:20],
                 data["search_date"],
                 now,
+                now,  # updated_at for ON DUPLICATE KEY UPDATE
             ),
         )
         return cur.lastrowid
+
+
+def update_search_result_screenshot(task_id: str, platform: str, keyword: str, screenshot_url: str):
+    """更新查词记录的截图URL（用于异步补全场景）。
+    
+    Args:
+        task_id: 搜索任务ID
+        platform: 平台名称
+        keyword: 关键词
+        screenshot_url: 截图URL，或 "TIMEOUT" 表示超时
+    """
+    conn = get_conn()
+    if screenshot_url == "TIMEOUT":
+        # 超时：用特殊标记
+        _exec(conn,
+            """UPDATE search_result 
+               SET screenshot_url = 'TIMEOUT', updated_at = %s 
+               WHERE task_id = %s AND platform = %s AND keyword = %s""",
+            (_now(), task_id, platform, keyword),
+        )
+    else:
+        _exec(conn,
+            """UPDATE search_result 
+               SET screenshot_url = %s, updated_at = %s 
+               WHERE task_id = %s AND platform = %s AND keyword = %s""",
+            (screenshot_url, _now(), task_id, platform, keyword),
+        )
+    conn.commit()
 
 
 def update_result_brand(result_id: int, brand_rank: Optional[int], analysis_json: str):
@@ -2803,11 +2894,17 @@ def update_search_result(result_id: int, data: dict):
             vals.append(data[col])
     if not sets:
         return
-    vals.append(result_id)
-    _exec(conn,
-        f"UPDATE search_result SET {', '.join(sets)}, updated_at={_now()} WHERE id=%s",
-        tuple(vals),
-    )
+    # 注意：_now() 返回时间戳字符串，必须作为参数传入以避免SQL注入/语法错误
+    sql = f"UPDATE search_result SET {', '.join(sets)}, updated_at=%s WHERE id=%s"
+    # 参数顺序：各列值 + updated_at(_now) + id(result_id)
+    args = tuple(list(vals) + [_now(), result_id])
+    # 调试输出（处理Unicode编码问题）
+    try:
+        print(f"[DEBUG-SQL] sql={sql}", flush=True)
+        print(f"[DEBUG-SQL] args={args}", flush=True)
+    except UnicodeEncodeError:
+        print(f"[DEBUG-SQL] sql={sql} (args含特殊字符，省略)", flush=True)
+    _exec(conn, sql, args)
     conn.commit()
 
 
@@ -3180,14 +3277,27 @@ def get_search_history_grouped(account_id: int, limit_dates: int = 30) -> list[d
         # 从 created_at 提取日期
         created = str(tr.get("created_at") or "")[:10]
         if created and created in set(dates):
+            source = tr.get("source", "internal_manual")
+            # 根据source判断运行类型
+            if source == "retry_failed":
+                run_type = "重试失败"
+            elif source == "retry_continue":
+                run_type = "继续未完成"
+            elif source == "scheduled":
+                run_type = "定时任务"
+            else:
+                run_type = "手动查词"
+            
             task_map[created].append({
-                "id": tr["id"],
+                "taskId": tr["id"],  # 前端期望 taskId 字段
                 "totalQueries": tr.get("total_queries", 0),
                 "completedQueries": tr.get("completed_queries", 0),
                 "status": tr.get("status", "UNKNOWN"),
                 "errorMessage": tr.get("error_message") or "",
                 "createdAt": str(tr.get("created_at") or ""),
                 "completedAt": str(tr.get("completed_at") or ""),
+                "runType": run_type,
+                "totalInDb": int(tr.get("completed_queries") or 0),  # 数据库中的完成数
             })
 
     result = []
@@ -3214,7 +3324,7 @@ def get_search_history_grouped(account_id: int, limit_dates: int = 30) -> list[d
             status = "COMPLETED"
 
         model_stats = [
-            {"model": plat, "success": m["success"], "failCount": m["fail"]}
+            {"model": plat, "success": m["success"], "fail": m["fail"]}  # 前端使用 ms.fail
             for plat, m in stats["models"].items()
         ]
 
@@ -4220,13 +4330,13 @@ _DEFAULT_SETTINGS = {
     "search_api_timeout": "180",
     "yuanbao_api_url": "",
     "yuanbao_api_timeout": "180",
-    "llm_api_mode": "gemini",
+    "llm_api_mode": "qwen",
     "llm_base_url": "",
     "llm_timeout": "120",
-    "llm_model_name": "gemini-3-flash-preview",
+    "llm_model_name": "qwen-plus",
     "llm_api_key": "",
-    "gemini_model_name": "gemini-3-flash-preview",
-    "gemini_api_key": "",
+    "claude_model_name": "claude-sonnet-4-20250514",
+    "claude_api_key": "",
     "chatgpt_model_name": "gpt-4o-mini",
     "chatgpt_api_key": "",
     "qwen_model_name": "qwen-plus",
@@ -5348,20 +5458,49 @@ def get_unsearched_pairs(account_id: int, date: str, models: list[str]) -> list[
 
 
 def get_running_task_for_account(account_id: int) -> Optional[dict]:
-    """获取指定账户进行中的查词任务（RUNNING 或刚入队 PENDING）。
+    """获取指定账户进行中的查词任务（RUNNING/PENDING/ERROR）。
     worker-daemon 模式下 start 后任务先是 PENDING、由 worker 捞起才转 RUNNING;
     前端详情页据此立即 attach + 轮询,避免"刚点查词看不到日志、要重进才出现"。
-    优先返回 RUNNING,否则返回最新的 PENDING。"""
+    优先返回 RUNNING,其次 PENDING,最后返回最近的 ERROR(让用户看到失败状态)。
+    如果没有运行中任务，还会查找最近1小时内完成的 retry 任务（供前端恢复重试状态）。
+    """
     conn = get_conn()
+    # 优先查找运行中的任务
     d = _fetchone(conn,
         "SELECT * FROM search_task WHERE account_id=%s AND status IN ('RUNNING','PENDING') "
         "ORDER BY (status='RUNNING') DESC, created_at DESC LIMIT 1",
         (account_id,),
     )
+    # 如果没有运行中的任务，查找最近的错误任务（1小时内）
+    if not d:
+        d = _fetchone(conn,
+            "SELECT * FROM search_task WHERE account_id=%s AND status='ERROR' "
+            "AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR) "
+            "ORDER BY created_at DESC LIMIT 1",
+            (account_id,),
+        )
+    # 如果还没有，查找最近10分钟内完成的重试任务（用于恢复重试状态显示）
+    # 注意：只返回COMPLETED状态，不返回CANCELLED（避免取消后重新显示）
+    if not d:
+        d = _fetchone(conn,
+            "SELECT * FROM search_task WHERE account_id=%s "
+            "AND status='COMPLETED' "
+            "AND source IN ('retry_failed', 'retry_continue') "
+            "AND created_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE) "
+            "ORDER BY created_at DESC LIMIT 1",
+            (account_id,),
+        )
     if not d:
         return None
     total = d.get("total_queries") or 0
     completed = d.get("completed_queries") or 0
+    source = d.get("source", "internal_manual")
+    # 根据来源判断是否为重试任务
+    retry_type = None
+    if source == "retry_failed":
+        retry_type = "failed"
+    elif source == "retry_continue":
+        retry_type = "continue"
     return {
         "taskId": d["id"],
         "status": d["status"],
@@ -5373,7 +5512,8 @@ def get_running_task_for_account(account_id: int) -> Optional[dict]:
         "createdAt": d.get("created_at", ""),
         "completedAt": d.get("completed_at", ""),
         "priority": d.get("priority", 7),
-        "source": d.get("source", "internal_manual"),
+        "source": source,
+        "retryType": retry_type,  # 新增：供前端恢复 retrySession
     }
 
 

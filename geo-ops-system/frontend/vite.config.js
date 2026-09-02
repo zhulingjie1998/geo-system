@@ -53,5 +53,15 @@ export default defineConfig({
         changeOrigin: true
       }
     }
+  },
+  // 预览服务器也配置代理（解决 4173 端口无法访问后端 API 的问题）
+  preview: {
+    port: 4173,
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:' + (process.env.GEO_DEV_PORT || '3106'),
+        changeOrigin: true
+      }
+    }
   }
 })

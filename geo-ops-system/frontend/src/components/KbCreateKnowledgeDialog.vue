@@ -25,8 +25,8 @@
     </template>
 
     <el-form label-width="92px" class="kb-create-form" v-loading="loadingAll" @submit.prevent>
-      <!-- 目标客户 -->
-      <el-form-item label="目标客户" required>
+      <!-- 目标客户（无预选时显示） -->
+      <el-form-item v-if="!defaultAccountId" label="目标客户" required>
         <div class="kb-field-row">
           <button type="button" class="kb-acct-picker" :class="{ empty: !accountId }"
                   @click="openAcctPicker">
@@ -49,6 +49,47 @@
       <!-- 基础资料 -->
       <el-form-item label="基础资料" required>
         <div class="kb-upload-card">
+          <!-- 历史已上传资料选择 -->
+          <div v-if="existingSources.length" class="kb-existing-sources">
+            <div class="kb-file-list-head">
+              <span>历史已上传资料 <strong>{{ existingSources.length }}</strong></span>
+              <el-button text type="primary" size="small" @click="toggleSelectAllSources">
+                {{ isAllSourcesSelected ? '全部取消' : '全选' }}
+              </el-button>
+            </div>
+            <div class="kb-file-grid">
+              <label
+                v-for="src in existingSources"
+                :key="src.id"
+                class="kb-file-card kb-source-selectable"
+                :class="{ selected: selectedSourceIds.has(src.id) }"
+              >
+                <input
+                  type="checkbox"
+                  :value="src.id"
+                  :checked="selectedSourceIds.has(src.id)"
+                  @change="toggleSource(src.id)"
+                  class="kb-source-checkbox"
+                />
+                <div class="kb-file-meta">
+                  <div class="kb-file-name" :title="src.file_name">{{ src.file_name }}</div>
+                  <div class="kb-file-status">
+                    <span v-if="src.parsed" class="status-parsed">已解析</span>
+                    <span v-else class="status-pending">解析中</span>
+                    <span class="kb-file-size">{{ formatSize(src.file_size) }}</span>
+                  </div>
+                </div>
+              </label>
+            </div>
+            <div class="kb-sources-hint">
+              <el-icon :size="12"><InfoFilled /></el-icon>
+              勾选历史资料后无需重复上传，可直接用于生成知识库
+            </div>
+          </div>
+
+          <div v-if="existingSources.length && uploadQueue.length" class="kb-upload-divider">
+            <span>或上传新资料</span>
+          </div>
           <el-upload
             drag
             multiple
@@ -190,6 +231,8 @@ import CustomerCreateDialog from '@/components/common/CustomerCreateDialog.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
+  /** 预选客户 ID（详情页传入，此时隐藏客户选择器） */
+  defaultAccountId: { type: [Number, String], default: null },
 })
 const emit = defineEmits(['update:modelValue', 'created'])
 
@@ -205,6 +248,9 @@ const allAccounts = ref([])
 const uploadQueue = ref([])
 const remark = ref('')
 const newCustomerVisible = ref(false)
+// 历史资料相关状态
+const existingSources = ref([])
+const selectedSourceIds = ref(new Set())
 let pollTimer = null
 
 // ── 客户选择弹窗 ──
@@ -241,10 +287,17 @@ function openAcctPicker() {
 function pickAcct(a) {
   accountId.value = a.id
   acctPickerOpen.value = false
+  // 切换客户时重新加载历史资料
+  loadExistingSources(a.id)
 }
 
-const canUploadOnly = computed(() => !!accountId.value && uploadQueue.value.length > 0)
-const canGenerate = computed(() => !!accountId.value && uploadQueue.value.length > 0)
+const canUploadOnly = computed(() => !!accountId.value && (uploadQueue.value.length > 0 || selectedSourceIds.value.size > 0))
+const canGenerate = computed(() => !!accountId.value && (uploadQueue.value.length > 0 || selectedSourceIds.value.size > 0))
+
+// 历史资料选择计算属性
+const isAllSourcesSelected = computed(() => {
+  return existingSources.value.length > 0 && selectedSourceIds.value.size === existingSources.value.length
+})
 
 const brandSuggestions = computed(() => {
   const brands = new Set()
@@ -292,6 +345,46 @@ function removeUpload(uid) {
   uploadQueue.value = uploadQueue.value.filter((item) => item.uid !== uid)
 }
 
+// ── 历史资料选择功能 ──
+async function loadExistingSources(accId) {
+  if (!accId) {
+    existingSources.value = []
+    selectedSourceIds.value = new Set()
+    return
+  }
+  try {
+    const res = await publishApi.kbListSources(accId)
+    const sources = Array.isArray(res) ? res : []
+    existingSources.value = sources
+    // 默认全选已解析的资料
+    selectedSourceIds.value = new Set(
+      sources.filter(s => s.parsed).map(s => s.id)
+    )
+  } catch (e) {
+    console.warn('加载历史资料失败:', e)
+    existingSources.value = []
+    selectedSourceIds.value = new Set()
+  }
+}
+
+function toggleSource(id) {
+  const newSet = new Set(selectedSourceIds.value)
+  if (newSet.has(id)) {
+    newSet.delete(id)
+  } else {
+    newSet.add(id)
+  }
+  selectedSourceIds.value = newSet
+}
+
+function toggleSelectAllSources() {
+  if (isAllSourcesSelected.value) {
+    selectedSourceIds.value = new Set()
+  } else {
+    selectedSourceIds.value = new Set(existingSources.value.map(s => s.id))
+  }
+}
+
 async function loadAccounts() {
   const accountsRes = await api.listAccounts()
   allAccounts.value = Array.isArray(accountsRes) ? accountsRes : []
@@ -304,21 +397,48 @@ async function handleCustomerSaved(created) {
 }
 
 async function uploadFiles(files, account) {
-  if (!files.length) return []
+  if (!files.length) return { saved: [], recognizeTasks: [] }
   files.forEach((f) => { f.status = 'pending' })
   const rawFiles = files.map((f) => f.file)
   const result = await publishApi.kbUploadSources(account, rawFiles)
   files.forEach((f) => { f.status = 'uploaded' })
-  return result?.saved || []
+  return {
+    saved: result?.saved || [],
+    recognizeTasks: result?.recognize_tasks || [],
+  }
 }
 
 async function uploadOnly() {
   if (!canUploadOnly.value) return
   busy.value = 'upload'
   try {
-    await uploadFiles(uploadQueue.value, accountId.value)
+    const result = await uploadFiles(uploadQueue.value, accountId.value)
     uploadQueue.value = []
-    ElMessage.success('资料上传完成')
+    
+    // 处理识别任务，显示浮窗
+    const recognizeTasks = result.recognizeTasks || []
+    if (recognizeTasks.length) {
+      const firstTask = recognizeTasks[0]
+      const fileNames = recognizeTasks.map(t => t.file_name).join('、')
+      // 触发浮窗显示识别进度
+      window.dispatchEvent(new CustomEvent('kb-task-start', {
+        detail: {
+          phase: 'llm',
+          taskId: firstTask.task_id,
+          accountId: accountId.value,
+          accountName: pickedAccountLabel.value,
+          taskType: 'recognize',
+          hint: `智能识别中：${firstTask.file_name}`,
+          text: `正在智能识别 ${recognizeTasks.length} 份资料：${fileNames}`,
+        },
+      }))
+      ElMessage.info(`资料上传完成，正在智能识别中（${fileNames}），完成后右下角自动通知`)
+    } else {
+      ElMessage.success('资料上传完成')
+    }
+    
+    // 通知父组件刷新资料列表
+    emit('created', { action: 'uploaded', accountId: accountId.value })
   } catch (e) {
     ElMessage.error(e?.response?.data?.error || e.message || '上传失败')
   } finally {
@@ -328,14 +448,19 @@ async function uploadOnly() {
 
 async function generateKb() {
   if (!canGenerate.value) {
-    ElMessage.warning('请选择客户并上传基础资料')
+    ElMessage.warning('请选择客户并选择或上传基础资料')
     return
   }
   busy.value = 'generate'
   try {
-    const uploaded = await uploadFiles(uploadQueue.value, accountId.value)
+    // 合并：新上传的文件 + 已选的历史资料
+    const uploadResult = await uploadFiles(uploadQueue.value, accountId.value)
     uploadQueue.value = []
-    const sourceIds = uploaded.map((r) => Number(r.id)).filter(Boolean)
+    const newSourceIds = (uploadResult.saved || []).map((r) => Number(r.id)).filter(Boolean)
+    // 合并历史已选资料ID
+    const historySourceIds = Array.from(selectedSourceIds.value)
+    const sourceIds = [...new Set([...historySourceIds, ...newSourceIds])]
+    
     if (!sourceIds.length) throw new Error('资料未准备完成，请稍后重试')
 
     const result = await publishApi.kbGenerate(accountId.value, remark.value, sourceIds)
@@ -419,12 +544,23 @@ watch(
   () => props.modelValue,
   async (show) => {
     if (!show) return
-    accountId.value = null
+    // 如果有预选客户 ID（详情页传入），直接使用
+    if (props.defaultAccountId) {
+      accountId.value = Number(props.defaultAccountId)
+    } else {
+      accountId.value = null
+    }
     uploadQueue.value = []
     remark.value = ''
+    existingSources.value = []
+    selectedSourceIds.value = new Set()
     loadingAll.value = true
     try {
       await loadAccounts()
+      // 加载预选客户的历史资料
+      if (accountId.value) {
+        await loadExistingSources(accountId.value)
+      }
       await nextTick()
     } finally {
       loadingAll.value = false
@@ -731,6 +867,82 @@ defineExpose({ open })
   color: #cbd5e1; transition: all .15s; flex-shrink: 0;
 }
 .kb-file-rm:hover { background: #fee2e2; color: #dc2626; }
+
+/* ── 历史资料选择区域 ── */
+.kb-existing-sources {
+  margin-bottom: 14px;
+  padding: 14px;
+  background: #f8fafc;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+}
+.kb-source-selectable {
+  cursor: pointer;
+  user-select: none;
+}
+.kb-source-selectable:hover {
+  border-color: #a5b4fc;
+  background: #f5f3ff;
+}
+.kb-source-selectable.selected {
+  border-color: #6366f1;
+  background: #eef2ff;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .1);
+}
+.kb-source-checkbox {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #6366f1;
+  flex-shrink: 0;
+}
+.kb-source-selectable .kb-file-meta {
+  padding-left: 26px; /* 为checkbox留空间 */
+}
+.kb-file-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  margin-top: 2px;
+}
+.status-parsed {
+  color: #16a34a;
+  font-weight: 500;
+}
+.status-pending {
+  color: #d97706;
+  font-weight: 500;
+}
+.kb-upload-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0;
+  color: #94a3b8;
+  font-size: 12px;
+}
+.kb-upload-divider::before,
+.kb-upload-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e2e8f0;
+}
+.kb-sources-hint {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: #64748b;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+}
 
 /* ── Footer ── */
 .kb-footer {

@@ -54,6 +54,61 @@ def _kb_context_text(modules: list[dict]) -> str:
 
 
 # ============================================================
+# 语言支持
+# ============================================================
+
+def _get_language_name(code: str) -> str:
+    """根据语言代码返回语言名称（用于 system prompt）"""
+    lang_map = {
+        'zh-CN': '简体中文', 'zh-TW': '繁體中文',
+        'en-US': 'American English', 'en-GB': 'British English',
+        'ja-JP': '日本語', 'ko-KR': '한국어',
+        'vi-VN': 'Tiếng Việt', 'th-TH': 'ภาษาไทย',
+        'id-ID': 'Bahasa Indonesia', 'ms-MY': 'Bahasa Melayu',
+        'fil-PH': 'Filipino',
+        'fr-FR': 'Français', 'de-DE': 'Deutsch',
+        'es-ES': 'Español', 'es-MX': 'Español (Latinoamérica)',
+        'it-IT': 'Italiano', 'pt-PT': 'Português (Portugal)',
+        'pt-BR': 'Português (Brasil)', 'nl-NL': 'Nederlands',
+        'pl-PL': 'Polski', 'ru-RU': 'Русский',
+        'uk-UA': 'Українська', 'ar-SA': 'العربية',
+        'hi-IN': 'हिन्दी', 'ta-IN': 'தமிழ்',
+        'tr-TR': 'Türkçe', 'sv-SE': 'Svenska',
+        'da-DK': 'Dansk', 'fi-FI': 'Suomi',
+        'nb-NO': 'Norsk', 'el-GR': 'Ελληνικά',
+        'cs-CZ': 'Čeština', 'ro-RO': 'Română',
+        'hu-HU': 'Magyar', 'bg-BG': 'Български',
+        'he-IL': 'עברית', 'fa-IR': 'فارسی',
+        'ur-PK': 'اردو', 'bn-BD': 'বাংলা',
+        'sw-KE': 'Swahili', 'zu-ZA': 'Zulu',
+        'km-KH': 'ខ្មែរ', 'lo-LA': 'ພາສາລາວ',
+        'my-MM': 'မြန်မာဘာသာ', 'te-IN': 'తెలుగు',
+        'kn-IN': 'ಕನ್ನಡ',
+    }
+    return lang_map.get(code, code) or '简体中文'
+
+
+def _get_language_instruction(code: str) -> str:
+    """根据语言代码生成语言相关的指令提示"""
+    # 特殊语言的额外指令
+    special_instructions = {
+        'zh-CN': '# 输出要求\n- 请使用**简体中文**输出文章\n- 使用规范的中文标点符号',
+        'zh-TW': '# 輸出要求\n- 請使用**繁體中文**輸出文章\n- 使用規範的中文標點符號',
+        'en-US': '# Output Requirements\n- Please write in **American English**\n- Use proper English grammar and spelling (US conventions)',
+        'en-GB': '# Output Requirements\n- Please write in **British English**\n- Use proper English grammar and spelling (UK conventions)',
+        'ja-JP': '# 出力要件\n- **日本語**で記事を執筆してください\n- 適切な日本語の文法と表現を使用してください',
+        'ko-KR': '# 출력 요구사항\n- **한국어**로 기사를 작성해주세요\n- 적절한 한국어 문법과 표현을 사용하세요',
+        'th-TH': '# ความต้องการในการส่งออก\n- กรุณาเขียนบทความเป็น**ภาษาไทย**\n- ใช้ไวยากรณ์และการสะกดที่ถูกต้อง',
+        'vi-YV': '# Yêu cầu đầu ra\n- Viết bài bằng **Tiếng Việt**\n- Sử dụng ngữ pháp và chính tả tiếng Việt chuẩn',
+        'ar-SA': '# متطلبات الإخراج\n- يرجى كتابة المقالة باللغة **العربية**\n- استخدم القواعد والنحو العربي الصحيح',
+    }
+    
+    base_instruction = f'# 输出语言\n- 请使用 **{_get_language_name(code)}** 输出整篇文章'
+    
+    return special_instructions.get(code, base_instruction)
+
+
+# ============================================================
 # DB CRUD — content_draft_batch
 # ============================================================
 
@@ -277,18 +332,29 @@ def generate_article(*, account_id: int, instruction: str,
                      model: str | None, keyword: str,
                      topic_title: str, topic_angle: str,
                      supplement: str, kb_module_ids: list,
+                     language: str = "zh-CN",
                      metadata: dict | None = None) -> dict:
     """调用 Qwen 生成单篇文章。
+
+    Args:
+        language: 输出语言代码，如 zh-CN, en-US, ja-JP 等
 
     Returns:
         {article_id, title, content, word_count}
     """
     settings = db.get_all_settings()
+    # 强制使用通义千问（忽略前端传来的 claude 等其他模型）
+    if model and not model.startswith('qwen') and not model.startswith('qw-'):
+        logger.warning("[content] 前端传入非Qwen模型(%s)，强制切换为qwen-plus", model)
+        model = None
     qwen_model = model or settings.get("qwen_model_name") or "qwen-plus"
 
     # 获取 KB 模块内容
     kb_modules = _get_kb_modules(account_id, kb_module_ids)
     kb_context = _kb_context_text(kb_modules)
+
+    # 根据语言代码构建语言指令
+    lang_instruction = _get_language_instruction(language)
 
     # 构建完整 prompt
     user_prompt = f"""# 写作指令
@@ -305,13 +371,15 @@ def generate_article(*, account_id: int, instruction: str,
 # 客户知识库参考内容
 {kb_context}
 
+{lang_instruction}
+
 请根据以上信息，撰写一篇高质量的文章。直接输出文章正文（含标题），不要输出其他说明。"""
 
     try:
         content = llm_qwen.call_qwen(
             settings,
             user_prompt=user_prompt,
-            system_prompt="你是一个专业的内容创作者，擅长根据知识库素材和写作指令生成高质量文章。",
+            system_prompt=f"你是一个专业的内容创作者，擅长根据知识库素材和写作指令生成高质量文章。请用{_get_language_name(language)}输出内容。",
             max_tokens=8192,
             timeout=300,
             model=qwen_model,
@@ -335,16 +403,42 @@ def generate_article(*, account_id: int, instruction: str,
 
     word_count = len(content)
 
-    # 保存到 content_draft 表（batch_id=0 表示单篇生成）
+    # 保存到 content_draft 表（自动创建批次以便在内容库中显示）
     user_id = (metadata or {}).get("user_id") or 0
+    
+    # 自动创建批次（单篇生成也创建批次，方便内容库展示）
+    batch_name = f"智能生文-{topic_title[:30]}" if topic_title else "智能生文"
+    batch_id = create_batch(
+        user_id=user_id,
+        account_id=account_id,
+        name=batch_name,
+        template_id=0,
+        llm_provider="qwen",
+        kb_module_keys=",".join(str(x) for x in (kb_module_ids or [])),
+        user_instruction=instruction[:2000] if instruction else "",
+        word_min=None,
+        word_max=None,
+        source_kind="ai-write",
+        source_topics=topic_title or "",
+        total_count=1,
+        gen_mode="single",
+    )
+    
+    # 创建草稿并关联到批次
     draft_id = create_draft(
-        batch_id=0, user_id=user_id, account_id=account_id,
+        batch_id=batch_id,  # 使用新创建的批次ID
+        user_id=user_id, account_id=account_id,
         template_id=0, topic=topic_title, variant_index=1,
         llm_provider="qwen", llm_model=qwen_model,
         extra_instruction=instruction[:2000] if instruction else None,
     )
+    
+    # 更新草稿状态和批次状态
     update_draft_status(draft_id, status="done", title=title,
                         content=content, word_count=word_count)
+    
+    # 更新批次为完成状态
+    update_batch_status(batch_id, status="done", done_count=1)
 
     return {
         "article_id": draft_id,

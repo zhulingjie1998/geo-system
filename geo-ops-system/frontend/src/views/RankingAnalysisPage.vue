@@ -236,7 +236,7 @@
               <el-option
                 v-for="c in customerOptions"
                 :key="c.id"
-                :label="c.customerName + ' · ' + (rows.find(r=>r.id===c.id)?.brands?.join('、') || '')"
+                :label="c.customerName + (c.brands?.length ? ' · ' + c.brands.join('、') : '')"
                 :value="c.id"
               />
             </el-select>
@@ -734,10 +734,22 @@ const platformList = ['ChatGPT', 'Google AIO', 'Google AIM', 'Gemini', 'Perplexi
 /* ===== 列表数据（由 API 填充） ===== */
 const rows = ref([])
 
-/* ===== 客户选项（模拟） ===== */
-const customerOptions = computed(() =>
-  rows.value.filter(r => r.type === 'paid').map(r => ({ id: r.id, customerName: r.customerName }))
-)
+/* ===== 客户选项（从客户管理列表获取） ===== */
+const customerOptions = ref([])
+
+async function loadCustomerOptions() {
+  try {
+    const accounts = await api.getAccounts()
+    customerOptions.value = (Array.isArray(accounts) ? accounts : []).map(a => ({
+      id: a.id,
+      customerName: a.customerName || a.companyName || '',
+      brands: a.brands || [],
+    }))
+  } catch (e) {
+    console.warn('加载客户列表失败', e)
+    customerOptions.value = []
+  }
+}
 
 /* ===== 可用品牌列表（去重） ===== */
 const availableBrands = computed(() => {
@@ -1285,6 +1297,7 @@ async function loadData() {
 
 onMounted(() => {
   loadData()
+  loadCustomerOptions()
 })
 </script>
 

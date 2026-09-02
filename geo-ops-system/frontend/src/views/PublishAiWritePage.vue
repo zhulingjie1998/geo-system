@@ -202,6 +202,78 @@
           </el-radio-group>
         </div>
 
+        <!-- ===== 语言选择 ===== -->
+        <div class="sc-card sc-card-lang">
+          <div class="sc-card-head">
+            <div class="sc-card-head-icon sc-icon-blue">
+              <el-icon><ChatDotRound /></el-icon>
+            </div>
+            <div class="sc-card-head-text">
+              <div class="sc-card-title">输出语言</div>
+              <div class="sc-card-sub">生成文章的目标语言</div>
+            </div>
+          </div>
+          <el-select v-model="selectedLanguage" placeholder="选择语言" class="sc-lang-select">
+            <el-option-group label="常用语言">
+              <el-option label="中文（简体）" value="zh-CN" />
+              <el-option label="中文（繁体）" value="zh-TW" />
+              <el-option label="英语（美国）" value="en-US" />
+              <el-option label="英语（英国）" value="en-GB" />
+            </el-option-group>
+            <el-option-group label="亚洲语言">
+              <el-option label="日语" value="ja-JP" />
+              <el-option label="韩语" value="ko-KR" />
+              <el-option label="越南语" value="vi-VN" />
+              <el-option label="泰语" value="th-TH" />
+              <el-option label="印尼语" value="id-ID" />
+              <el-option label="马来语" value="ms-MY" />
+              <el-option label="高棉语（柬埔寨）" value="km-KH" />
+              <el-option label="老挝语" value="lo-LA" />
+              <el-option label="缅甸语" value="my-MM" />
+              <el-option label="菲律宾语" value="fil-PH" />
+            </el-option-group>
+            <el-option-group label="欧洲语言">
+              <el-option label="法语" value="fr-FR" />
+              <el-option label="德语" value="de-DE" />
+              <el-option label="西班牙语（欧洲）" value="es-ES" />
+              <el-option label="意大利语" value="it-IT" />
+              <el-option label="葡萄牙语（欧洲）" value="pt-PT" />
+              <el-option label="葡萄牙语（巴西）" value="pt-BR" />
+              <el-option label="荷兰语" value="nl-NL" />
+              <el-option label="波兰语" value="pl-PL" />
+              <el-option label="俄语" value="ru-RU" />
+              <el-option label="乌克兰语" value="uk-UA" />
+              <el-option label="捷克语" value="cs-CZ" />
+              <el-option label="罗马尼亚语" value="ro-RO" />
+              <el-option label="匈牙利语" value="hu-HU" />
+              <el-option label="瑞典语" value="sv-SE" />
+              <el-option label="挪威语" value="nb-NO" />
+              <el-option label="丹麦语" value="da-DK" />
+              <el-option label="芬兰语" value="fi-FI" />
+              <el-option label="希腊语" value="el-GR" />
+              <el-option label="土耳其语" value="tr-TR" />
+              <el-option label="保加利亚语" value="bg-BG" />
+            </el-option-group>
+            <el-option-group label="中东/非洲语言">
+              <el-option label="阿拉伯语" value="ar-SA" />
+              <el-option label="希伯来语" value="he-IL" />
+              <el-option label="波斯语" value="fa-IR" />
+              <el-option label="乌尔都语" value="ur-PK" />
+              <el-option label="印地语" value="hi-IN" />
+              <el-option label="泰米尔语" value="ta-IN" />
+              <el-option label="泰卢固语" value="te-IN" />
+              <el-option label="卡纳达语" value="kn-IN" />
+              <el-option label="孟加拉语" value="bn-BD" />
+              <el-option label="斯瓦希里语" value="sw-KE" />
+              <el-option label="祖鲁语" value="zu-ZA" />
+            </el-option-group>
+            <el-option-group label="美洲语言">
+              <el-option label="西班牙语（拉丁美洲）" value="es-MX" />
+              <el-option label="葡萄牙语（巴西）" value="pt-BR" />
+            </el-option-group>
+          </el-select>
+        </div>
+
       </div>
     </div>
 
@@ -440,16 +512,40 @@ const modelOptions = ref([
   { value: 'qwen-plus', label: '通义千问' },
 ])
 
+/** 输出语言 */
+const selectedLanguage = ref('zh-CN')
+
 /** 从系统配置加载模型设置 */
 async function loadModelSettings() {
   try {
     const res = await fetch('/api/settings', { credentials: 'include' })
     if (!res.ok) return
     const data = await res.json()
-    const modelName = data.qwen_model_name || 'qwen-plus'
-    // 目前仅支持通义千问
-    modelOptions.value = [{ value: modelName, label: '通义千问' }]
-    selectedModel.value = modelName
+    const options = []
+    // Claude
+    if (data.claude_api_key) {
+      options.push({ value: data.claude_model_name || 'claude-sonnet-4-20250514', label: 'Claude' })
+    }
+    // ChatGPT
+    if (data.chatgpt_api_key) {
+      options.push({ value: data.chatgpt_model_name || 'gpt-4o-mini', label: 'ChatGPT' })
+    }
+    // 通义千问
+    if (data.qwen_api_key) {
+      options.push({ value: data.qwen_model_name || 'qwen-plus', label: '通义千问' })
+    }
+    if (options.length === 0) {
+      options.push({ value: 'qwen-plus', label: '通义千问' })
+    }
+    modelOptions.value = options
+    // 默认优先选择通义千问（除非只有 Claude 配置）
+    let defaultModel = 'qwen-plus'
+    if (data.qwen_api_key) {
+      defaultModel = data.qwen_model_name || 'qwen-plus'
+    } else if (options.length > 0) {
+      defaultModel = options[0].value
+    }
+    selectedModel.value = defaultModel
   } catch (e) {
     console.warn('加载模型设置失败，使用默认值')
     selectedModel.value = 'qwen-plus'
@@ -803,6 +899,29 @@ async function generateTopics(keywords, kbContext, count) {
 }
 
 /**
+ * 根据语言代码获取语言名称
+ */
+function getLanguageName(code) {
+  const langMap = {
+    'zh-CN': '中文（简体）', 'zh-TW': '中文（繁体）',
+    'en-US': 'English (US)', 'en-GB': 'English (UK)',
+    'ja-JP': '日本語', 'ko-KR': '한국어', 'vi-VN': 'Tiếng Việt', 'th-TH': 'ภาษาไทย',
+    'id-ID': 'Bahasa Indonesia', 'ms-MY': 'Bahasa Melayu', 'km-KH': 'ខ្មែរ',
+    'lo-LA': 'ພາສາລາວ', 'my-MM': 'မြန်မာဘာသာ', 'fil-PH': 'Filipino',
+    'fr-FR': 'Français', 'de-DE': 'Deutsch', 'es-ES': 'Español', 'it-IT': 'Italiano',
+    'pt-PT': 'Português (PT)', 'pt-BR': 'Português (BR)', 'nl-NL': 'Nederlands',
+    'pl-PL': 'Polski', 'ru-RU': 'Русский', 'uk-UA': 'Українська', 'cs-CZ': 'Čeština',
+    'ro-RO': 'Română', 'hu-HU': 'Magyar', 'sv-SE': 'Svenska', 'nb-NO': 'Norsk',
+    'da-DK': 'Dansk', 'fi-FI': 'Suomi', 'el-GR': 'Ελληνικά', 'tr-TR': 'Türkçe',
+    'bg-BG': 'Български', 'ar-SA': 'العربية', 'he-IL': 'עברית', 'fa-IR': 'فارسی',
+    'ur-PK': 'اردو', 'hi-IN': 'हिन्दी', 'ta-IN': 'தமிழ்', 'te-IN': 'తెలుగు',
+    'kn-IN': 'ಕನ್ನಡ', 'bn-BD': 'বাংলা', 'sw-KE': 'Swahili', 'zu-ZA': 'Zulu',
+    'es-MX': 'Español (Latinoamérica)',
+  }
+  return langMap[code] || code || '中文（简体）'
+}
+
+/**
  * Step 2: 将设置项替换到指令模板的变量中
  * 变量来源：品牌、生文变量、提示词、重点补充、主题
  */
@@ -845,9 +964,12 @@ function replaceTemplateVariables(templateContent, topic, extraVars = {}) {
       .map(m => m.name).join('、'),
     '{KB版本}': kbVersion.value || '',
 
-    // 模型/字数
+    // 模型/字数/语言
     '{模型}': modelOptions.value.find(m => m.value === selectedModel.value)?.label || '',
     '{字数范围}': '800~1500',
+    '{语言}': getLanguageName(selectedLanguage.value),
+    '{language}': selectedLanguage.value,
+    '{语言代码}': selectedLanguage.value,
 
     ...extraVars,
   }
@@ -973,6 +1095,7 @@ async function handleGenerate() {
           topic_angle: task.topic_angle,
           supplement: task.supplement,
           kb_module_ids: task.kb_module_ids,
+          language: selectedLanguage.value,  // 输出语言
           metadata: {
             task_uuid: task.uuid,
             instruction_id: task.instruction_id,
@@ -1351,6 +1474,13 @@ onMounted(() => {
 .sc-card-llm .sc-llm-radio {
   padding: 0 20px 16px;
 }
+
+/* ===== 语言选择 ===== */
+.sc-card-lang .sc-lang-select {
+  width: 100%;
+  padding: 0 20px 16px;
+}
+.sc-card-lang .el-select { width: 100%; }
 
 /* ===== 底部操作栏 ===== */
 .sc-actionbar {

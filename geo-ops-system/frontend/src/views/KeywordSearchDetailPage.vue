@@ -50,17 +50,18 @@
           >
             <el-icon><VideoPlay /></el-icon>{{ startBtnLabel }}
           </el-button>
+          <!-- 继续查词/重新查词 -->
           <el-tooltip
-            v-if="unsearchedCount > 0"
-            :content="unsearchedTooltip"
+            v-if="(taskProgress.status === 'ERROR' && selectedAccountId) || (unsearchedCount > 0 && ['COMPLETED','ERROR'].includes(taskProgress.status))"
+            :content="taskProgress.status === 'ERROR' ? '任务失败，点击重新开始全部查询' : unsearchedTooltip"
             placement="bottom"
             :show-after="300"
           >
             <el-button
               type="warning"
-              @click="continueSearch"
+              @click="taskProgress.status === 'ERROR' ? restartSearch() : continueSearch()"
             >
-              <el-icon><VideoPlay /></el-icon>继续查词 ({{ unsearchedCount }})
+              <el-icon><VideoPlay /></el-icon>{{ taskProgress.status === 'ERROR' ? `重新查词 (${taskProgress.total || keywords.length * platformsArray.value.length})` : `继续查词 (${unsearchedCount})` }}
             </el-button>
           </el-tooltip>
         </template>
@@ -573,9 +574,6 @@
             >
               <template #prefix><el-icon><Search /></el-icon></template>
             </el-input>
-            <el-button size="small" type="warning" plain :loading="accRunning" @click="runAccuracy">
-              {{ accRunning ? `检查中 ${accProgress.done}/${accProgress.total}` : '准确度检查' }}
-            </el-button>
             <el-checkbox v-if="accIssueCount" v-model="onlyAccIssues" size="small">
               仅看问题答案（{{ accIssueCount }}）
             </el-checkbox>
@@ -665,25 +663,38 @@
                 >{{ truncateText(row.answerText, 100) }}</div>
                 <span v-else class="answer-fail">
                   <el-icon style="margin-right:2px"><CircleCloseFilled /></el-icon>
-                  {{ row.error || '查询失败' }}
+                  <span>查询失败</span>
+                  <el-button type="danger" size="small" text @click.stop="showFailReason(row)" style="margin-left:4px;padding:0 4px">
+                    <el-icon><InfoFilled /></el-icon>原因
+                  </el-button>
                 </span>
               </template>
             </el-table-column>
 
             <el-table-column label="截图" width="84" align="center">
               <template #default="{ row }">
-                <div v-if="row.screenshotUrl" class="shot-cell" @click.stop="openShot(row)" title="点击查看大图">
+                <!-- 有截图URL -->
+                <div v-if="row.screenshotUrl && row.screenshotUrl !== 'TIMEOUT'" class="shot-cell" @click.stop="openShot(row)" title="点击查看大图">
                   <img :src="row.screenshotUrl" loading="lazy" referrerpolicy="no-referrer"
                        class="shot-thumb" :alt="row.keyword" />
                   <div class="shot-overlay">
                     <el-icon><ZoomIn /></el-icon>
                   </div>
                 </div>
+                <!-- 截图加载中（有文本结果但截图还在渲染） -->
+                <div v-else-if="row.success === 1 && !row.screenshotUrl" class="shot-cell shot-loading" title="截图生成中...">
+                  <el-icon class="is-loading"><Loading /></el-icon>
+                </div>
+                <!-- 截图超时/失败 -->
+                <div v-else-if="row.screenshotUrl === 'TIMEOUT'" class="shot-cell shot-timeout" title="截图加载超时">
+                  <el-icon><PictureRounded /></el-icon>
+                </div>
+                <!-- 无数据 -->
                 <span v-else class="cell-muted">-</span>
               </template>
             </el-table-column>
 
-            <el-table-column label="耗时" width="60" align="right">
+            <el-table-column label="耗时" width="60" align="right" prop="duration" sortable>
               <template #default="{ row }">
                 <span class="dur-text">{{ row.duration ? row.duration.toFixed(1) + 's' : '-' }}</span>
               </template>
@@ -715,6 +726,45 @@
               <el-button type="primary" tag="a" :href="shotRow?.screenshotUrl" target="_blank" :icon="Download">
                 下载原图
               </el-button>
+            </template>
+          </el-dialog>
+
+          <!-- 失败原因查看弹窗 -->
+          <el-dialog
+            v-model="failReasonDialog"
+            title="查询失败原因"
+            width="520px"
+            append-to-body
+            destroy-on-close
+          >
+            <div class="fail-reason-content">
+              <div class="fr-item">
+                <span class="fr-label">关键词：</span>
+                <span class="fr-value">{{ failReasonData.keyword }}</span>
+              </div>
+              <div class="fr-item">
+                <span class="fr-label">平台：</span>
+                <span class="fr-value"><PlatformIcon v-if="failReasonData.platform" :name="failReasonData.platform" :size="16" /> {{ failReasonData.platform }}</span>
+              </div>
+              <el-divider />
+              <div class="fr-item">
+                <span class="fr-label">Ka API 状态：</span>
+                <el-tag size="small" :type="failReasonData.kaStatus === 'FAILED' ? 'danger' : 'warning'">
+                  {{ failReasonData.kaStatus || '未知' }}
+                </el-tag>
+              </div>
+              <div v-if="failReasonData.kaError" class="fr-item">
+                <span class="fr-label">Ka API 错误：</span>
+                <span class="fr-value fr-error">{{ failReasonData.kaError }}</span>
+              </div>
+              <el-divider />
+              <div class="fr-item">
+                <span class="fr-label">系统错误信息：</span>
+                <span class="fr-value fr-error">{{ failReasonData.error }}</span>
+              </div>
+            </div>
+            <template #footer>
+              <el-button @click="failReasonDialog = false">关闭</el-button>
             </template>
           </el-dialog>
 
@@ -798,7 +848,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   VideoPlay, VideoPause, Search, Delete, ArrowLeft, ArrowDown, ArrowUp,
   ArrowRight, Download, Close, TrendCharts, CircleCheckFilled, CircleCloseFilled,
-  WarningFilled, Refresh, ZoomIn,
+  WarningFilled, Refresh, ZoomIn, Loading, PictureRounded, InfoFilled,
 } from '@element-plus/icons-vue'
 import api from '@/api/index.js'
 import PlatformIcon from '@/components/PlatformIcon.vue'
@@ -1052,6 +1102,11 @@ const elapsedTime = ref('0s')
 const finishedAt = ref('')
 let elapsedTimer = null
 
+// 截图补全刷新定时器：任务完成后定期刷新以获取异步补全的截图
+let screenshotRefreshTimer = null
+const SCREENSHOT_REFRESH_INTERVAL = 5000  // 5秒刷新一次
+const SCREENSHOT_REFRESH_MAX_DURATION = 600000  // 最多刷新10分钟
+
 const progressLog = ref([])
 const logListRef = ref(null)
 const retrying = ref(false)
@@ -1067,6 +1122,10 @@ const confirmDialogVisible = ref(false)
 const selectiveDialogVisible = ref(false)
 const selectivePlatforms = ref([])
 const selectiveKeywords = ref([])
+// 当前任务实际使用的平台（用于进度显示，可能少于配置的平台）
+const activePlatformsForTask = ref([])
+// 缓存最后一次有效的总分母，防止任务完成后分母跳变导致进度倒退
+const cachedFullDenominator = ref(0)
 
 // 注意：in-flight 行（success===null, inflight=true）既不算成功也不算失败
 const logSuccessCount = computed(() => progressLog.value.filter(i => !i.inflight && i.success === true).length)
@@ -1097,12 +1156,12 @@ const avgDuration = computed(() => {
   return avg.toFixed(1) + 's'
 })
 const doneKeywordSet = computed(() => new Set(progressLog.value.map(i => i.keyword)))
-// 重试 / 继续查询会话信息：后端在 startRetry/continue 时返回，前端用来精确显示"待补查"
+// 重试 / 继续查询会话信息：后端在 startRetry/continue 时返回，前端用来精确显示"待补查" [v2-fix]
 const retrySession = ref({ active: false, type: '', total: 0, pendingPairs: [] })
 // 已完成的 (keyword, model) 集合，用于过滤出仍在补查队列里的
 const donePairSet = computed(() => {
   const s = new Set()
-  for (const i of progressLog.value) s.add(`${i.keyword}||${i.model}`)
+  for (const i of progressLog.value) s.add(`${i.keyword}||${i.platform || i.model}`)
   return s
 })
 const pendingKeywords = computed(() => {
@@ -1110,7 +1169,7 @@ const pendingKeywords = computed(() => {
   // 重试 / 继续模式：以后端返回的 pendingPairs 为准，过滤掉已完成
   if (retrySession.value.active && retrySession.value.pendingPairs.length) {
     return retrySession.value.pendingPairs
-      .filter(p => !donePairSet.value.has(`${p.keyword}||${p.model}`))
+      .filter(p => !donePairSet.value.has(`${p.keyword}||${p.platform}`))
       .map(p => p.keyword)
   }
   // 全量查词：从账号关键词减去已完成
@@ -1120,7 +1179,7 @@ const pendingKeywords = computed(() => {
 })
 const retryRemaining = computed(() => {
   if (!retrySession.value.active) return 0
-  return retrySession.value.pendingPairs.filter(p => !donePairSet.value.has(`${p.keyword}||${p.model}`)).length
+  return retrySession.value.pendingPairs.filter(p => !donePairSet.value.has(`${p.keyword}||${p.platform}`)).length
 })
 
 // ── 计算属性 ──
@@ -1152,9 +1211,16 @@ const isRetrySession = computed(() => !!retrySession.value.active)
 const fullDenominator = computed(() => {
   if (isRetrySession.value && retrySession.value.total) return retrySession.value.total
   const k = keywords.value.length
-  const p = platformsArray.value.length
-  if (k > 0 && p > 0) return k * p
-  return taskProgress.value.total || 0
+  // 优先使用当前任务的实际平台数，否则用配置的平台数
+  const p = (activePlatformsForTask.value.length || platformsArray.value.length)
+  if (k > 0 && p > 0) {
+    const d = k * p
+    // 缓存有效分母，防止任务完成后分母跳变导致进度倒退
+    if (d > 0 && !taskRunning.value) cachedFullDenominator.value = Math.max(cachedFullDenominator.value, d)
+    return d
+  }
+  // 回退时优先使用缓存值（避免从后端 total=120 跳回导致进度倒退）
+  return cachedFullDenominator.value || taskProgress.value.total || 0
 })
 const progressPercentage = computed(() => {
   const d = fullDenominator.value
@@ -1174,7 +1240,9 @@ const platformProgress = computed(() => {
     }
   } else {
     const perTotal = keywords.value.length || 0
-    for (const p of platformsArray.value) map[p] = { plat: p, done: 0, ok: 0, fail: 0, total: perTotal }
+    // 使用当前任务的实际平台列表
+    const plats = activePlatformsForTask.value.length ? activePlatformsForTask.value : platformsArray.value
+    for (const p of plats) map[p] = { plat: p, done: 0, ok: 0, fail: 0, total: perTotal }
   }
   for (const it of progressLog.value) {
     const m = map[it.platform]
@@ -1386,7 +1454,7 @@ async function runAccuracy() {
     ElMessage.error('启动失败:' + (e.response?.data?.error || e.message))
   }
 }
-watch(selectedDate, () => { accMap.value = {}; onlyAccIssues.value = false; loadAccuracy() })
+watch(selectedDate, () => { accMap.value = {}; onlyAccIssues.value = false; loadAccuracy(); loadResults() })
 function escapeHtml(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
@@ -1546,7 +1614,27 @@ async function loadHistory() {
 }
 async function loadResults() {
   if (!selectedAccountId.value) return
-  try { results.value = await api.getSearchResults(selectedAccountId.value, selectedDate.value || undefined) || [] } catch { results.value = [] }
+  try {
+    results.value = await api.getSearchResults(selectedAccountId.value, selectedDate.value || undefined) || []
+    const saved = getSavedRunningTask()
+    // 当结果已落库但 session 中仍有旧的 RUNNING task 缓存时，不能继续把详情页卡成 loading。
+    if (saved && saved.accountId === selectedAccountId.value && isStaleRunningTask(saved)) {
+      clearRunningTask()
+      taskRunning.value = false
+      cancelling.value = false
+      stopProgressPolling(); stopElapsedTimer()
+      taskProgress.value = {
+        status: 'COMPLETED',
+        total: Math.max(taskProgress.value.total || 0, results.value.length),
+        completed: results.value.length,
+        currentKeyword: '',
+        percentage: 100,
+      }
+      retrySession.value = { active: false, type: '', total: 0, pendingPairs: [] }
+      activePlatformsForTask.value = []
+      finishedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    }
+  } catch { results.value = [] }
 }
 
 /* ============ 截图大图 ============ */
@@ -1560,6 +1648,31 @@ function openShot(row) {
   if (!row?.screenshotUrl) return
   shotRow.value = row
   shotDialogVisible.value = true
+}
+
+// 查看失败原因弹窗
+const failReasonDialog = ref(false)
+const failReasonData = ref({ keyword: '', platform: '', error: '', kaStatus: '', kaError: '' })
+function showFailReason(row) {
+  failReasonData.value = {
+    keyword: row.keyword || row.intentPrompt || '',
+    platform: row.platform || row.model || '',
+    error: row.error || '未知错误',
+    // 尝试从response_json解析更详细的Ka API错误信息
+    kaStatus: '',
+    kaError: ''
+  }
+  // 如果有response_json，尝试解析
+  if (row.responseJson) {
+    try {
+      const rj = typeof row.responseJson === 'string' ? JSON.parse(row.responseJson) : row.responseJson
+      failReasonData.value.kaStatus = rj.status || ''
+      failReasonData.value.kaError = rj.errorMessage || ''
+    } catch (e) {
+      // 解析失败，使用原始error
+    }
+  }
+  failReasonDialog.value = true
 }
 
 async function onSelectedDateChange() {
@@ -1588,12 +1701,22 @@ async function deleteHistoryByDate() {
   try {
     const res = await api.deleteSearchHistory(selectedAccountId.value, date)
     ElMessage.success(`已删除 ${res?.deleted || 0} 条查词记录`)
-    selectedDate.value = ''
-    results.value = []
+    // 先加载新的日期列表（保持当前列表不闪烁）
     await loadHistory()
+    // 再切换到最新的日期（如果有）
     if (historyDates.value.length) {
-      selectedDate.value = historyDates.value[0]
-      await loadResults()
+      // 如果删除的是当前选中的日期，或日期不存在了，才切换
+      if (!historyDates.value.includes(date)) {
+        selectedDate.value = historyDates.value[0]
+        await loadResults()
+      } else {
+        // 当前日期还在（不应该发生），重新加载结果
+        await loadResults()
+      }
+    } else {
+      // 没有历史记录了
+      selectedDate.value = ''
+      results.value = []
     }
   } catch (e) {
     ElMessage.error(e?.response?.data?.error || e?.message || '删除失败')
@@ -1610,9 +1733,21 @@ function clearRunningTask() {
 function getSavedRunningTask() {
   try { return JSON.parse(sessionStorage.getItem('geo_running_task') || 'null') } catch { return null }
 }
+function isStaleRunningTask(taskState) {
+  if (!taskState || !taskState.startTime) return false
+  if (!Array.isArray(results.value) || !results.value.length) return false
+  const ageMs = Date.now() - Number(taskState.startTime)
+  return ageMs > 10 * 60 * 1000
+}
 
 function attachTask(taskId, total, accountId, opts = {}) {
   currentTaskId.value = taskId; taskRunning.value = true; cancelling.value = false
+  // 重置分母缓存，让新任务重新计算
+  cachedFullDenominator.value = 0
+  // 如果没有指定活动平台，使用全部配置平台
+  if (!activePlatformsForTask.value.length) {
+    activePlatformsForTask.value = [...platformsArray.value]
+  }
   // F5: 不强写 status='RUNNING'——保持空字符串占位，等首次 poll 拿到后端真实
   // 状态后赋值，避免"详情页打开瞬间显示运行中但其实任务早已 COMPLETED"的错位。
   taskProgress.value = {
@@ -1659,8 +1794,10 @@ async function doStartSearch() {
     const resp = await api.startSearch(selectedAccountId.value, {
       platforms: platformsArray.value,
     })
+    // 全量查词使用全部配置平台
+    activePlatformsForTask.value = [...platformsArray.value]
     attachTask(resp.taskId, resp.total, selectedAccountId.value)
-    ElMessage.success(resp.overwrite ? '已覆盖当天查词任务' : '查词已启动')
+    ElMessage.success((resp.overwrite ? '已覆盖当天查词任务' : '查词已启动') + `，待查 ${resp.total || 0} 项`)
   } catch (e) { ElMessage.error('启动失败：' + (e.response?.data?.error || e.message)) }
 }
 
@@ -1670,8 +1807,10 @@ async function doSelectiveSearch() {
   if (selectiveKeywords.value.length) body.keywords = selectiveKeywords.value
   try {
     const resp = await api.startSearch(selectedAccountId.value, body)
+    // 记录本次任务实际使用的平台
+    activePlatformsForTask.value = [...selectivePlatforms.value]
     attachTask(resp.taskId, resp.total, selectedAccountId.value)
-    ElMessage.success(resp.overwrite ? '已覆盖当天查词任务' : '已新建查词任务')
+    ElMessage.success('已新建查词任务' + `，待查 ${resp.total || 0} 项`)
   } catch (e) { ElMessage.error('启动失败：' + (e.response?.data?.error || e.message)) }
 }
 
@@ -1712,6 +1851,31 @@ function startProgressPolling() {
     if (!currentTaskId.value) { stopProgressPolling(); return }
     try {
       const prog = await api.getSearchProgress(currentTaskId.value)
+      const saved = getSavedRunningTask()
+      const staleForResults = saved && saved.accountId === selectedAccountId.value && isStaleRunningTask(saved)
+      if (staleForResults && ['RUNNING', 'PENDING', ''].includes(String(prog.status || '').toUpperCase())) {
+        taskProgress.value = {
+          status: 'COMPLETED',
+          total: Math.max(prog.total || 0, results.value.length || 0),
+          completed: results.value.length || prog.completed || 0,
+          currentKeyword: '',
+          percentage: 100,
+        }
+        taskRunning.value = false; cancelling.value = false; stopProgressPolling(); stopElapsedTimer()
+        retrySession.value = { active: false, type: '', total: 0, pendingPairs: [] }
+        activePlatformsForTask.value = []
+        clearRunningTask()
+        const now = new Date()
+        finishedAt.value = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')} 完成`
+        ElMessage.success('已恢复到已完成状态')
+        await loadHistory()
+        if (!selectedDate.value && historyDates.value.length) {
+          selectedDate.value = historyDates.value[0]
+        }
+        await loadResults()
+        await checkUnsearched()
+        return
+      }
       taskProgress.value = prog
       try {
         const log = await api.getSearchProgressLog(currentTaskId.value)
@@ -1728,6 +1892,7 @@ function startProgressPolling() {
       if (['COMPLETED','CANCELLED','ERROR'].includes(prog.status)) {
         taskRunning.value = false; cancelling.value = false; stopProgressPolling(); stopElapsedTimer()
         retrySession.value = { active: false, type: '', total: 0, pendingPairs: [] }
+        activePlatformsForTask.value = []  // 重置活动平台
         clearRunningTask()
         const now = new Date()
         finishedAt.value = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')} 完成`
@@ -1741,11 +1906,49 @@ function startProgressPolling() {
         }
         await loadResults()
         await checkUnsearched()
+        // 启动截图补全自动刷新（仅任务成功完成时）
+        if (prog.status === 'COMPLETED') {
+          startScreenshotRefresh()
+        }
       }
     } catch {}
   }, 2000)
 }
 function stopProgressPolling() { if (progressTimer) { clearInterval(progressTimer); progressTimer = null } }
+
+// ═══════════════════════════════════════════
+// 截图补全自动刷新：任务完成后定期刷新结果以获取异步补全的截图
+// ═══════════════════════════════════════════
+function startScreenshotRefresh() {
+  stopScreenshotRefresh()
+  let refreshCount = 0
+  const maxRefreshes = Math.floor(SCREENSHOT_REFRESH_MAX_DURATION / SCREENSHOT_REFRESH_INTERVAL)
+  
+  screenshotRefreshTimer = setInterval(async () => {
+    refreshCount++
+    try {
+      await loadResults()
+      // 检查是否所有成功记录都有截图了
+      const pendingShots = results.value.filter(r => r.success && !r.screenshotUrl).length
+      if (refreshCount >= maxRefreshes || pendingShots === 0) {
+        console.log(`[截图刷新] 停止: 已刷新${refreshCount}次, 待补全截图: ${pendingShots}`)
+        // 超时后，将仍无截图的记录标记为 TIMEOUT
+        if (refreshCount >= maxRefreshes && pendingShots > 0) {
+          results.value.forEach(r => {
+            if (r.success && !r.screenshotUrl) {
+              r.screenshotUrl = 'TIMEOUT'
+            }
+          })
+        }
+        stopScreenshotRefresh()
+      }
+    } catch {}
+  }, SCREENSHOT_REFRESH_INTERVAL)
+}
+
+function stopScreenshotRefresh() { 
+  if (screenshotRefreshTimer) { clearInterval(screenshotRefreshTimer); screenshotRefreshTimer = null } 
+}
 function startElapsedTimer() {
   stopElapsedTimer()
   elapsedTimer = setInterval(() => {
@@ -1791,6 +1994,11 @@ async function continueSearch() {
   if (!selectedAccountId.value) return
   try {
     const resp = await api.continueSearch(selectedAccountId.value)
+    // 检查是否返回了有效任务
+    if (!resp.taskId) {
+      ElMessage.warning('没有待查的关键词')
+      return
+    }
     attachTask(resp.taskId, resp.total, selectedAccountId.value, {
       completed: resp.completed,
       retryType: resp.retryType || 'continue',
@@ -1799,6 +2007,15 @@ async function continueSearch() {
     })
     ElMessage.success(`继续查词已启动，待查 ${resp.retryCount || resp.total} 项`)
   } catch (e) { ElMessage.error('继续查词失败：' + (e.response?.data?.error || e.message)) }
+}
+
+// 重新开始全部查词（用于失败任务）
+async function restartSearch() {
+  if (!selectedAccountId.value) return
+  // 走选择性查词弹窗，让用户勾选平台（默认全选，可去掉 gemini 等）
+  selectivePlatforms.value = [...platformsArray.value]
+  selectiveKeywords.value = []
+  selectiveDialogVisible.value = true
 }
 
 async function retryFailedSearch() {
@@ -1855,10 +2072,11 @@ onMounted(async () => {
     await handleAccountChange(accountId.value)
   }
   loadExecHistory().catch(() => {})
-  if (_cameFromHistoryLink()) {
+  // 先尝试恢复任务，再决定是否隐藏进度面板
+  const hasResumed = await tryResumeTask()
+  // 只有在没有恢复到有效任务且是从历史链接进入时才隐藏进度面板
+  if (!hasResumed && _cameFromHistoryLink()) {
     progressDismissed.value = true
-  } else {
-    await tryResumeTask()
   }
 })
 
@@ -1873,24 +2091,126 @@ watch(accountId, async (newId, oldId) => {
   progressLog.value = []
   retrySession.value = { active: false, type: '', total: 0, pendingPairs: [] }
   finishedAt.value = ''
-  progressDismissed.value = _cameFromHistoryLink()
   selectedAccountId.value = newId
   await handleAccountChange(newId)
   loadExecHistory().catch(() => {})
-  if (!progressDismissed.value) await tryResumeTask()
+  // 先尝试恢复任务，再决定是否隐藏进度面板
+  const hasResumed = await tryResumeTask()
+  if (!hasResumed && _cameFromHistoryLink()) {
+    progressDismissed.value = true
+  }
 })
 
 async function tryResumeTask() {
   // 仅复用与当前账号一致的 session 任务，避免跨客户串扰
   const saved = getSavedRunningTask()
+  // 任务超时阈值：30分钟，超过则认为任务已卡死
+  const TASK_TIMEOUT_MS = 30 * 60 * 1000
   if (saved && saved.taskId && saved.accountId && saved.accountId === selectedAccountId.value) {
+    if (Array.isArray(results.value) && results.value.length > 0 && isStaleRunningTask(saved)) {
+      clearRunningTask()
+      taskRunning.value = false
+      taskProgress.value = {
+        status: 'COMPLETED',
+        total: Math.max(taskProgress.value.total || 0, results.value.length),
+        completed: results.value.length,
+        currentKeyword: '',
+        percentage: 100,
+      }
+      retrySession.value = { active: false, type: '', total: 0, pendingPairs: [] }
+      activePlatformsForTask.value = []
+      finishedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+      return true
+    }
     try {
       const prog = await api.getSearchProgress(saved.taskId)
-      if (prog && (prog.status === 'RUNNING' || prog.status === 'PENDING')) {
+      // 检查任务是否真的在运行（状态 + 时间验证）
+      const isRecentTask = saved.startTime && (Date.now() - saved.startTime) < TASK_TIMEOUT_MS
+      if (prog && (prog.status === 'RUNNING' || prog.status === 'PENDING') && isRecentTask) {
         currentTaskId.value = saved.taskId; taskRunning.value = true
         taskProgress.value = prog; startTime = saved.startTime || Date.now()
+        // 【重要】恢复重试会话信息，否则退出再进入数量会变回总量
+        if (prog.retryType) {
+          retrySession.value = {
+            active: true,
+            type: prog.retryType,
+            total: prog.total || 0,
+            pendingPairs: prog.pendingPairs || [],  // 使用后端返回的pendingPairs
+          }
+        }
         startElapsedTimer(); startProgressPolling()
-        return
+        return true  // 成功恢复任务
+      }
+      // 任务已完成/失败/取消，也显示进度面板（让用户看到结果）
+      if (prog && ['COMPLETED', 'ERROR', 'CANCELLED'].includes(prog.status)) {
+        taskProgress.value = prog
+        // 【重要】如果是重试任务，必须恢复 retrySession，否则数量会变回总量
+        if (prog.retryType) {
+          retrySession.value = {
+            active: true,
+            type: prog.retryType,
+            total: prog.total || 0,
+            pendingPairs: prog.pendingPairs || [],  // 使用后端返回的pendingPairs
+          }
+        }
+        // 【关键修复】加载进度日志，否则前端显示0/2（因为displayCompleted依赖progressLog）
+        try {
+          const log = await api.getSearchProgressLog(saved.taskId)
+          progressLog.value = log || []
+          console.log('[tryResumeTask] 已加载进度日志:', progressLog.value.length, '条')
+        } catch (e) {
+          console.warn('[tryResumeTask] 加载进度日志失败:', e)
+          progressLog.value = []
+        }
+        // 失败或完成时加载结果和日期
+        loadHistory().then(() => {
+          if (!selectedDate.value && historyDates.value.length) {
+            selectedDate.value = historyDates.value[0]
+            loadResults()
+          } else if (selectedDate.value) {
+            loadResults()
+          }
+        })
+        checkUnsearched()
+        return true  // 有历史任务状态，显示面板
+      }
+    } catch {}
+    clearRunningTask()
+  }
+  // Fallback 1: 从后端获取运行中任务（sessionStorage 无记录时）
+  if (selectedAccountId.value) {
+    try {
+      const running = await api.getRunningTask(selectedAccountId.value)
+      // 【修复】增加 COMPLETED 状态，因为后端会返回最近1小时内完成的重试任务
+      if (running && running.taskId && ['RUNNING', 'PENDING', 'ERROR', 'COMPLETED'].includes(running.status)) {
+        // 运行中/已完成任务正常处理
+        if (running.status === 'RUNNING' || running.status === 'PENDING') {
+          currentTaskId.value = running.taskId; taskRunning.value = true
+          taskProgress.value = running; startTime = Date.now()
+          // 恢复重试会话信息（如果后端返回了 retryType）
+          if (running.retryType) {
+            retrySession.value = {
+              active: true,
+              type: running.retryType,
+              total: running.total || 0,
+              pendingPairs: [],
+            }
+          }
+          startElapsedTimer(); startProgressPolling()
+          saveRunningTask(running.taskId, selectedAccountId.value)
+        } else if (running.status === 'ERROR') {
+          // 失败任务：显示状态和错误信息，不启动轮询
+          taskProgress.value = running
+          // 加载失败时的结果（如果有部分成功）
+          loadHistory().then(() => {
+            if (!selectedDate.value && historyDates.value.length) {
+              selectedDate.value = historyDates.value[0]
+              loadResults()
+            }
+          })
+          checkUnsearched()
+        }
+        return true  // 有任务状态，显示面板
       }
     } catch {}
     clearRunningTask()
@@ -1898,14 +2218,30 @@ async function tryResumeTask() {
   if (selectedAccountId.value) {
     try {
       const running = await api.getRunningTask(selectedAccountId.value)
-      if (running && running.taskId && (running.status === 'RUNNING' || running.status === 'PENDING')) {
-        currentTaskId.value = running.taskId; taskRunning.value = true
-        taskProgress.value = running; startTime = Date.now()
-        startElapsedTimer(); startProgressPolling()
-        saveRunningTask(running.taskId, selectedAccountId.value)
+      if (running && running.taskId && ['RUNNING', 'PENDING', 'ERROR'].includes(running.status)) {
+        // 运行中任务正常处理
+        if (running.status === 'RUNNING' || running.status === 'PENDING') {
+          currentTaskId.value = running.taskId; taskRunning.value = true
+          taskProgress.value = running; startTime = Date.now()
+          startElapsedTimer(); startProgressPolling()
+          saveRunningTask(running.taskId, selectedAccountId.value)
+        } else if (running.status === 'ERROR') {
+          // 失败任务：显示状态和错误信息，不启动轮询
+          taskProgress.value = running
+          // 加载失败时的结果（如果有部分成功）
+          loadHistory().then(() => {
+            if (!selectedDate.value && historyDates.value.length) {
+              selectedDate.value = historyDates.value[0]
+              loadResults()
+            }
+          })
+          checkUnsearched()
+        }
+        return true  // 有任务状态，显示面板
       }
     } catch {}
   }
+  return false  // 没有可恢复的任务
 }
 onUnmounted(() => {
   stopProgressPolling(); stopElapsedTimer()
@@ -2440,6 +2776,32 @@ onUnmounted(() => {
 }
 .shot-cell:hover .shot-overlay { opacity: 1; }
 
+/* 截图加载中状态 */
+.shot-loading {
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+  border-color: #93c5fd;
+  animation: shot-pulse 2s ease-in-out infinite;
+}
+.shot-loading .el-icon {
+  font-size: 20px; color: #3b82f6;
+}
+
+/* 截图超时状态 */
+.shot-timeout {
+  display: flex; align-items: center; justify-content: center;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+.shot-timeout .el-icon {
+  font-size: 18px; color: #ef4444;
+}
+
+@keyframes shot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 /* ===== 大图 dialog ===== */
 .shot-dialog :deep(.el-dialog__body) {
   padding: 12px 16px 4px;
@@ -2461,6 +2823,23 @@ onUnmounted(() => {
   max-width: 100%; height: auto; display: block;
   border-radius: 4px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* ===== 失败原因弹窗 ===== */
+.fail-reason-content { padding: 8px 0; }
+.fail-reason-content .fr-item {
+  display: flex; align-items: flex-start; margin-bottom: 12px;
+  line-height: 1.6;
+}
+.fail-reason-content .fr-label {
+  color: #606266; font-weight: 500; min-width: 110px; flex-shrink: 0;
+}
+.fail-reason-content .fr-value {
+  color: #303133; word-break: break-all;
+}
+.fail-reason-content .fr-error {
+  color: #f56c6c; background: #fef0f0; padding: 4px 8px; border-radius: 4px;
+  font-size: 13px;
 }
 
 .row-expand { padding: 14px 24px 14px 44px; background: #f8faff; border-left: 3px solid #409eff; }

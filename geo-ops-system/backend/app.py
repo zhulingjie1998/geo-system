@@ -1403,6 +1403,90 @@ import permissions as _perms_registry  # noqa: E402
 def api_test_debug():
     return jsonify({"msg": "TEST-WORKS-" + str(len(_perms_registry.PAGE_REGISTRY)), "scopes": list(_perms_registry.VALID_DATA_SCOPES)})
 
+
+@app.post("/api/test-ka-api")
+def api_test_ka_api():
+    """Test Ka API connectivity from server"""
+    try:
+        data = request.get_json(silent=True) or {}
+        mode = data.get('mode', 'single')  # single | batch10
+
+        if mode == 'single':
+            result = overseas_search_adapter._ka_post('/firecrawl/kaTaskSubmit', {
+                'keyword': 'Is MPMC a reliable diesel generator sets manufacturer?',
+                'platform': 'chatGpt',
+                'language': 'en'
+            })
+            return jsonify({"success": True, "result": result})
+        else:
+            # Batch 10
+            tasks_10 = [
+                {'keyword': f'Test keyword {i}', 'platform': p, 'language': 'en'}
+                for i, p in enumerate(['chatGpt', 'gemini', 'google', 'bingCopilot', 'perplexity',
+                                       'googleAIM', 'chatGpt', 'gemini', 'google', 'bingCopilot'])
+            ]
+            results = overseas_search_adapter.submit_ka_tasks(tasks_10)
+            return jsonify({
+                "success": True,
+                "count": len(results),
+                "first_result": results[0] if results else None
+            })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.post("/api/test-ka-screenshot")
+def api_test_ka_screenshot():
+    """调试: 提交单条任务并轮询, 检查Ka API返回的截图字段"""
+    import json as _json
+    import time as _time
+    try:
+        # Step 1: 提交任务
+        submit_result = overseas_search_adapter._ka_post('/firecrawl/kaTaskBatchSubmit', {
+            'tasks': [{'keyword': 'MPMC generator quality test', 'platform': 'chatGpt', 'language': 'en'}]
+        })
+        if not isinstance(submit_result, list) or not submit_result:
+            return jsonify({"error": "submit failed", "result": submit_result}), 500
+
+        task_id = submit_result[0].get('localTaskId')
+        if not task_id:
+            return jsonify({"error": "no localTaskId", "result": submit_result}), 500
+
+        # Step 2: 轮询直到完成
+        poll_count = 0
+        final_result = None
+        for i in range(30):  # 最多等5分钟
+            _time.sleep(10)
+            poll_count += 1
+            detail = overseas_search_adapter.query_ka_detail([task_id])
+            if detail:
+                r = detail[0]
+                status = r.get('status', '')
+                final_result = r
+                if status in ('COMPLETED', 'FAILED'):
+                    break
+
+        if not final_result:
+            return jsonify({"error": "timeout", "poll_count": poll_count}), 500
+
+        # Step 3: 分析截图字段
+        result_obj = final_result.get('result') or {}
+        return jsonify({
+            "poll_count": poll_count,
+            "status": final_result.get('status'),
+            "errorMessage": final_result.get('errorMessage', ''),
+            "screenshotUrl": final_result.get('screenshotUrl', '(字段不存在)'),
+            "result_remotePath": result_obj.get('remotePath', '(字段不存在)'),
+            "result_keys": list(result_obj.keys()) if result_obj else [],
+            "top_keys": list(final_result.keys()),
+            "text_length": len(result_obj.get('text', '') or ''),
+            "full_result": _json.dumps(final_result, ensure_ascii=False)[:3000]
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "trace": traceback.format_exc()[-500:]}), 500
+
+
 @app.get("/api/permissions/registry")
 
 def api_permissions_registry():
@@ -2555,9 +2639,9 @@ def api_start_temp_search():
 
 def api_search_progress(task_id):
 
-    task, _err = _search_task_or_403(task_id)
+    task, err_resp = _search_task_or_403(task_id)
 
-    if _err: return _err
+    if err_resp: return err_resp
 
     return jsonify(task)
 
@@ -2571,9 +2655,9 @@ def api_search_progress_log(task_id):
 
     """"""
 
-    task, _err = _search_task_or_403(task_id)
+    task, err_resp = _search_task_or_403(task_id)
 
-    if _err: return _err
+    if err_resp: return err_resp
 
     return jsonify(db.get_search_progress_log(task_id))
 
@@ -2585,9 +2669,9 @@ def api_search_progress_log(task_id):
 
 def api_cancel_search(task_id):
 
-    task, _err = _search_task_or_403(task_id)
+    task, err_resp = _search_task_or_403(task_id)
 
-    if _err: return _err
+    if err_resp: return err_resp
 
 
 
@@ -2760,18 +2844,38 @@ def api_retry_failed(task_id):
 
     task = db.get_search_task(task_id)
 
-    if not task or task.get("status") != "FAILED":
+    if not task:
 
-        return jsonify({"error": "任务不存在或未失败"}), 404
+        return jsonify({"error": "任务不存在"}), 404
+
+    # 支持两种场景：
+    # 1. 任务完全失败 (status=FAILED) - 重试整个任务
+    # 2. 任务部分成功 (status=COMPLETED) - 只重试失败的记录
+    if task.get("status") not in ("FAILED", "COMPLETED"):
+
+        return jsonify({"error": "任务状态不允许重试"}), 400
 
     import overseas_search_adapter as _adapter
 
-    failed = [task]
+    # 获取失败的记录（success=0）
+    if task.get("status") == "FAILED":
+        # 整个任务失败 - 需要从数据库获取原始任务的失败记录来重试
+        # 因为 task 只是摘要信息，不包含具体的 keyword/platform
+        failed = db.get_failed_search_results(task_id) or [task]
+        if len(failed) == 1 and failed[0].get("id") == task.get("taskId"):
+            # 没有找到失败记录，使用原任务本身（整个任务失败的情况）
+            failed = [task]
+            retry_total = task.get("total", 0)
+        else:
+            retry_total = len(failed)
+    else:
+        # 部分失败，只重试失败的记录
+        failed = db.get_failed_search_results(task_id)
+        if not failed:
+            return jsonify({"error": "没有需要重试的失败记录", "retryCount": 0}), 200
+        retry_total = len(failed)
 
     tasks_to_submit = []
-
-
-
 
     for r in failed:
 
@@ -2785,103 +2889,253 @@ def api_retry_failed(task_id):
 
         })
 
-
-
-
-
-    try:
-
-        submitted = _adapter.submit_ka_tasks(tasks_to_submit)
-
-        valid_ids = [s.get("localTaskId") for s in submitted if s.get("localTaskId")]
-
-    except Exception as e:
-
-        err_msg = "Ka 閹绘劒姘︽径杈Е: " + str(e)[:200]
-
-        return jsonify({"error": err_msg}), 500
-
-
-
-    if not valid_ids:
-
-        return jsonify({"error": "Ka 鏉╂柨娲栭弮鐘虫箒閺佸牅鎹崝?ID"}), 500
-
-
-
-
-
-    def _retry_worker():
-
-        search_date = datetime.now().strftime("%Y-%m-%d")
-
+    # 生成新的重试任务ID（用于前端attach和轮询）
+    retry_task_id = str(uuid.uuid4())
+    
+    # 在数据库中创建重试任务记录（让前端轮询能找到）
+    # 使用原任务的account_id
+    account_id = task.get("accountId") or (failed[0].get("account_id") if failed else None)
+    if not account_id:
+        # 尝试从数据库重新获取完整信息
+        full_task = db._fetchone(db.get_conn(), "SELECT account_id FROM search_task WHERE id=%s", (task_id,))
+        if full_task:
+            account_id = full_task.get("account_id")
+    
+    if account_id:
         try:
-            results = _adapter.poll_ka_until_complete(valid_ids, interval=_adapter.POLL_INTERVAL, max_wait=_adapter.POLL_MAX_WAIT)
-            result_map = {r["localTaskId"]: r for r in results}
+            db.create_search_task(
+                retry_task_id, 
+                account_id, 
+                retry_total,  # 使用正确的重试数量（失败数或原任务总数）
+                status="RUNNING", 
+                source="retry_failed"
+            )
+            logger.info("[retry] 已创建重试任务记录: %s (account_id=%s, total=%d)", retry_task_id, account_id, retry_total)
+        except Exception as e:
+            logger.warning("[retry] 创建任务记录失败（非致命）: %s", e)
+    else:
+        logger.error("[retry] 无法获取原任务的 account_id! task_id=%s", task_id)
+    
+    # 立即返回的数据
+    response_data = {
 
+        "message": f"正在重试 {retry_total} 个失败查询",
+
+        "taskId": retry_task_id,  # 新的任务ID，前端用这个来attach
+        
+        "total": retry_total,  # 使用统一的 retry_total（与数据库一致）
+        "completed": 0,  # 初始完成数
+        "retryCount": retry_total,  # 重试数量（与数据库一致）
+        "retryType": "failed",  # 重试类型
+        "pendingPairs": [{"platform": r.get("platform", ""), "keyword": r.get("keyword", "")} for r in failed],
+
+    }
+
+    # ═══════════════════════════════════════════
+    # 异步执行：后台线程负责 提交→轮询→更新
+    # 注意：由于Python daemon线程的模块实例隔离问题，
+    #       必须在此闭包中直接实现所有逻辑，不能调用adapter/db模块的函数
+    #       同时使用requests而非httpx（避免线程中的连接问题）
+    # ═══════════════════════════════════════════
+    import requests as req_lib
+    KA_BASE_URL = "https://api.71360.com/api/app/tcloud-geo"
+    
+    def _retry_worker_async():
+        """异步重试worker：直接实现Ka API调用 + 轮询 + 数据库更新"""
+        print(f"[DEBUG-WORKER] Worker线程开始执行! tasks={len(tasks_to_submit)}", flush=True)
+        search_date = datetime.now().strftime("%Y-%m-%d")
+        submitted = []
+        valid_ids = []
+        
+        # 检查是否已被取消
+        if db.is_cancel_requested(retry_task_id):
+            print(f"[DEBUG-WORKER] 任务已取消，退出", flush=True)
+            db.update_search_task_status(retry_task_id, "CANCELLED")
+            return
+        
+        try:
+            # ========== 步骤1: 直接调用Ka API提交任务 ==========
+            print(f"[DEBUG-WORKER] 步骤1: 直接调用Ka API提交...", flush=True)
+            
+            # 构建请求数据
+            normalized = []
+            for t in tasks_to_submit:
+                p = t.get("platform", "")
+                ka_platform = p if p in ("perplexity", "chatGpt", "google", "gemini", "bingCopilot", "googleAIM") else p
+                language = t.get("language", "en")
+                if ka_platform == "gemini" and language in ("", None, "en"):
+                    language = "US"
+                normalized.append({"keyword": t["keyword"], "platform": ka_platform, "language": language})
+            
+            print(f"[DEBUG-WORKER] 提交 {len(normalized)} 个任务到Ka API...", flush=True)
+            
+            try:
+                submit_url = f"{KA_BASE_URL}/firecrawl/kaTaskBatchSubmit"
+                print(f"[DEBUG-WORKER] POST {submit_url}", flush=True)
+                
+                # 使用requests库代替httpx
+                resp = req_lib.post(submit_url, json={"tasks": normalized}, timeout=120)
+                print(f"[DEBUG-WORKER] Ka API响应状态: {resp.status_code}", flush=True)
+                resp.raise_for_status()
+                body = resp.json()
+                    
+                if body.get("code") == 200 and body.get("data"):
+                    submitted = body["data"] if isinstance(body["data"], list) else [body["data"]]
+                    print(f"[DEBUG-WORKER] Ka API返回 {len(submitted)} 个任务", flush=True)
+                else:
+                    print(f"[DEBUG-WORKER] Ka API返回错误: {body}", flush=True)
+                    raise RuntimeError(f"Ka API error: {body.get('message', 'unknown')}")
+                    
+            except Exception as e:
+                print(f"[DEBUG-WORKER] Ka API提交异常: {type(e).__name__}: {e}", flush=True)
+                db.update_search_task_status(retry_task_id, "FAILED")
+                return
+            
+            valid_ids = [s.get("localTaskId") for s in submitted if s.get("localTaskId")]
+            print(f"[DEBUG-WORKER] 有效任务ID: {valid_ids}", flush=True)
+            
+            if not valid_ids:
+                print(f"[DEBUG-WORKER] 没有有效的任务ID", flush=True)
+                db.update_search_task_status(retry_task_id, "FAILED")
+                return
+            
+            # 更新任务进度
+            db.update_search_task_progress(retry_task_id, 0, "正在等待Ka API返回结果...")
+            
+            # ========== 步骤2: 直接轮询Ka API ==========
+            print(f"[DEBUG-WORKER] 步骤2: 开始轮询 {len(valid_ids)} 个任务...", flush=True)
+            
+            import time
+            POLL_INTERVAL = 5  # 秒
+            POLL_MAX_WAIT = 300  # 5分钟超时
+            
+            start_time = time.time()
+            pending_ids = set(valid_ids)
+            result_map = {}
+            
+            while pending_ids and (time.time() - start_time) < POLL_MAX_WAIT:
+                print(f"[DEBUG-WORKER] 轮询中... 剩余 {len(pending_ids)} 个, 已用时 {time.time()-start_time:.1f}s", flush=True)
+                
+                try:
+                    detail_url = f"{KA_BASE_URL}/firecrawl/kaTaskDetail"
+                    # 使用requests库代替httpx
+                    resp = req_lib.post(detail_url, json={"localTaskIds": list(pending_ids)}, timeout=60)
+                    resp.raise_for_status()
+                    body = resp.json()
+                        
+                    results = body.get("data", []) if isinstance(body.get("data"), list) else ([body["data"]] if body.get("data") else [])
+                    print(f"[DEBUG-WORKER] 轮询返回 {len(results)} 条结果", flush=True)
+                    
+                    for r in results:
+                        tid = r.get("localTaskId")
+                        if tid:
+                            result_map[tid] = r
+                            status = r.get("status", "")
+                            if status in ("COMPLETED", "FAILED"):
+                                pending_ids.discard(tid)
+                                print(f"[DEBUG-WORKER] 任务 {tid} 完成: status={status}", flush=True)
+                                
+                except Exception as e:
+                    print(f"[DEBUG-WORKER] 轮询异常: {type(e).__name__}: {e}", flush=True)
+                    time.sleep(5)
+                    continue
+                
+                time.sleep(POLL_INTERVAL)
+            
+            print(f"[DEBUG-WORKER] 轮询结束! 结果数: {len(result_map)}, 剩余未完成: {len(pending_ids)}", flush=True)
+            
+            # ========== 步骤3: 直接更新数据库 ==========
+            print(f"[DEBUG-WORKER] 步骤3: 更新数据库...", flush=True)
             updated = 0
-
+            
             for i, r in enumerate(failed):
-
                 sub = submitted[i] if i < len(submitted) else {}
-
                 tid = sub.get("localTaskId")
-
                 ka_result = result_map.get(tid) if tid else {}
-
+                
                 status = ka_result.get("status", "FAILED")
-
                 result_obj = ka_result.get("result") or {}
-
                 text = result_obj.get("text", "") or ""
-
                 screenshot_url = (ka_result.get("screenshotUrl", "") or result_obj.get("remotePath", "") or "")
-
                 error_msg = (ka_result.get("errorMessage", "") or "")
-
-                db.update_search_result(r["id"], {
-
-                    "success": 1 if status == "COMPLETED" else 0,
-
-                    "response_json": json.dumps(ka_result, ensure_ascii=False)[:5000],
-
-                    "answer_text": text,
-
-                    "screenshot_url": screenshot_url,
-
-                    "error_message": error_msg[:500] if error_msg else "",
-
-                    "attempt": (r.get("attempt") or 1) + 1,
-
-                    "search_date": search_date,
-
-                })
-
+                
+                # 直接执行参数化SQL（避免db模块实例不一致问题）
+                _success = 1 if status == "COMPLETED" else 0
+                _response_json = json.dumps(ka_result, ensure_ascii=False)[:5000]
+                _error_msg = error_msg[:500] if error_msg else ""
+                _attempt = (r.get("attempt") or 1) + 1
+                
+                conn = db.get_conn()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE search_result SET success=%s, response_json=%s, answer_text=%s, "
+                        "screenshot_url=%s, error_message=%s, attempt=%s, search_date=%s, "
+                        "updated_at=%s WHERE id=%s",
+                        (_success, _response_json, text, screenshot_url, 
+                         _error_msg, _attempt, search_date, 
+                         db._now(), r["id"])
+                    )
+                conn.commit()
                 updated += 1
+                print(f"[DEBUG-WORKER] 已更新记录 ID={r['id']}, success={_success}", flush=True)
+            
+            print(f"[DEBUG-WORKER] 完成！共更新 {updated} 条记录", flush=True)
+            
+            # 更新重试任务状态为COMPLETED
+            try:
+                db.update_search_task_status(retry_task_id, "COMPLETED")
+                print(f"[DEBUG-WORKER] 任务 {retry_task_id} 已标记为COMPLETED", flush=True)
+            except Exception as e:
+                print(f"[DEBUG-WORKER] 更新任务状态失败: {e}", flush=True)
+            
+        except Exception as e:
+            print(f"[DEBUG-WORKER] Worker异常: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            try:
+                db.update_search_task_status(retry_task_id, "FAILED")
+            except:
+                pass
 
-            logger.info("[retry] 任务 %s 进度 %d/%d 已更新缓存", task_id, updated, len(failed))
+    # ═══════════════════════════════════════════
+    # 使用子进程执行重试（避免线程中的HTTP请求卡死问题）
+    # ═══════════════════════════════════════════
+    import sys, subprocess, json as _json
+    
+    # 将重试参数保存到临时文件
+    retry_params = {
+        "retry_task_id": retry_task_id,
+        "failed_records": failed,
+        "tasks_to_submit": tasks_to_submit,
+    }
+    params_file = f"c:/tmp/retry_{retry_task_id}.json"
+    os.makedirs(os.path.dirname(params_file), exist_ok=True)
+    with open(params_file, "w", encoding="utf-8") as f:
+        _json.dump(retry_params, f, ensure_ascii=False)
+    
+    print(f"[DEBUG-RETRY] 启动子进程执行重试, params={params_file}", flush=True)
+    
+    # 启动子进程运行重试脚本
+    script_path = os.path.join(os.path.dirname(__file__), "_retry_subprocess.py")
+    try:
+        import subprocess
+        # Windows: 使用CREATE_NO_WINDOW避免弹出控制台
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        subprocess.Popen(
+            [sys.executable, script_path, params_file],
+            creationflags=flags,
+            stdout=open(f"c:/tmp/retry_{retry_task_id}.log", "w"),
+            stderr=subprocess.STDOUT,
+        )
+    except Exception as e:
+        print(f"[DEBUG-RETRY] 子进程启动失败: {e}", flush=True)
+        logger.error("[retry] 子进程启动失败: %s", e)
+        return jsonify({"error": f"子进程启动失败: {e}"}), 500
+    
+    logger.info("[retry] 已启动子进程执行重试，taskId=%s, total=%d", retry_task_id, len(tasks_to_submit))
 
-        except Exception:
-
-            logger.exception("[retry] worker进程异常")
-
-
-
-    t = threading.Thread(target=_retry_worker, daemon=True)
-
-    t.start()
-
-
-
-    return jsonify({
-
-        "message": f"Error: see logs for details",
-
-        "retried": len(valid_ids),
-
-        "taskId": task_id,
-
-    })
+    # 立即返回，不等待后台处理
+    return jsonify(response_data)
 
 
 
@@ -2919,7 +3173,7 @@ def api_continue_search(account_id):
 
     if not missing_pairs:
 
-        return jsonify({"message": "娴犲﹤銇夐幍鈧張澶婂彠闁款喛鐦濋柈钘夊嚒閺屻儴顕楃€瑰本鍨", "submitted": 0})
+        return jsonify({"taskId": "", "total": 0, "submitted": 0, "retryCount": 0, "status": "COMPLETED", "completed": 0})
 
 
 
@@ -2927,9 +3181,9 @@ def api_continue_search(account_id):
 
     tasks_to_submit = []
 
-    for kw_prompt, model in missing_pairs:
-
-
+    for pair in missing_pairs:
+        kw_prompt = pair.get("keyword", "")
+        model = pair.get("model", "")
 
         plat = None
 
@@ -2951,7 +3205,7 @@ def api_continue_search(account_id):
 
     if not tasks_to_submit:
 
-        return jsonify({"message": "閺冪姵纭堕崠褰掑帳品牌", "submitted": 0})
+        return jsonify({"taskId": "", "total": 0, "submitted": 0, "retryCount": 0, "status": "COMPLETED", "completed": 0})
 
 
 
@@ -3051,7 +3305,14 @@ def api_continue_search(account_id):
 
     threading.Thread(target=_continue_worker, daemon=True).start()
 
-    return jsonify({"message": "Done", "submitted": 0})
+    return jsonify({
+        "taskId": task_id,
+        "total": len(tasks_to_submit),
+        "submitted": len(tasks_to_submit),
+        "retryCount": len(tasks_to_submit),
+        "status": "RUNNING",
+        "completed": 0
+    })
 
 
 
@@ -4145,11 +4406,11 @@ def _search_task_or_403(task_id: str):
 
     if not task:
 
-        return jsonify({"error": "Error"}), 404
+        return None, (jsonify({"error": "任务不存在"}), 404)
 
     if not _check_task_account_access(task):
 
-        return jsonify({"error": "Error"}), 403
+        return None, (jsonify({"error": "无权限访问该任务"}), 403)
 
     return task, None
 
@@ -4163,11 +4424,11 @@ def _quote_task_or_403(task_id: str):
 
     if not task:
 
-        return jsonify({"error": "Error"}), 404
+        return None, (jsonify({"error": "任务不存在"}), 404)
 
     if not _check_task_account_access(task):
 
-        return jsonify({"error": "Error"}), 403
+        return None, (jsonify({"error": "无权限访问该任务"}), 403)
 
     return task, None
 
@@ -4181,11 +4442,11 @@ def _citation_task_or_403(task_id: str):
 
     if not task:
 
-        return jsonify({"error": "Error"}), 404
+        return None, (jsonify({"error": "任务不存在"}), 404)
 
     if not _check_task_account_access(task):
 
-        return jsonify({"error": "Error"}), 403
+        return None, (jsonify({"error": "无权限访问该任务"}), 403)
 
     return task, None
 

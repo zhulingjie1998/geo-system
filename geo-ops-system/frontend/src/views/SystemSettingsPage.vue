@@ -102,9 +102,9 @@
           <div class="api-tabs">
             <div
               class="api-tab"
-              :class="{ active: analysisTab === 'gemini' }"
-              @click="switchTab('gemini')"
-            >Gemini</div>
+              :class="{ active: analysisTab === 'claude' }"
+              @click="switchTab('claude')"
+            >Claude</div>
             <div
               class="api-tab"
               :class="{ active: analysisTab === 'chatgpt' }"
@@ -117,12 +117,12 @@
             >通义千问</div>
           </div>
 
-          <!-- Gemini 配置 -->
-          <div v-show="analysisTab === 'gemini'" class="tab-content">
+          <!-- Claude 配置 -->
+          <div v-show="analysisTab === 'claude'" class="tab-content">
             <div class="grid-2col">
               <div class="field">
                 <label>API Base URL</label>
-                <el-input v-model="form.llm_base_url" placeholder="https://generativelanguage.googleapis.com/v1beta" />
+                <el-input v-model="form.llm_base_url" placeholder="https://api.anthropic.com" />
               </div>
               <div class="field">
                 <label>超时（秒）</label>
@@ -132,11 +132,11 @@
             <div class="grid-2col" style="margin-top: 8px;">
               <div class="field">
                 <label>Model Name</label>
-                <el-input v-model="form.gemini_model_name" placeholder="gemini-2.0-flash" />
+                <el-input v-model="form.claude_model_name" placeholder="claude-sonnet-4-20250514" />
               </div>
               <div class="field">
                 <label>API Key</label>
-                <el-input v-model="form.gemini_api_key" type="password" show-password :placeholder="apiKeyHints.gemini || '输入 Google AI API Key'" />
+                <el-input v-model="form.claude_api_key" type="password" show-password :placeholder="apiKeyHints.claude || '输入 Anthropic API Key'" />
               </div>
             </div>
           </div>
@@ -492,7 +492,7 @@ let savedFlashTimer = null
 function cardFingerprint(id) {
   if (id === 'analysis') {
     return JSON.stringify([analysisTab.value, form.llm_base_url, form.llm_timeout,
-      form.gemini_model_name, form.gemini_api_key,
+      form.claude_model_name, form.claude_api_key,
       form.chatgpt_model_name, form.chatgpt_api_key, form.chatgpt_base_url, form.chatgpt_timeout,
       form.qwen_base_url, form.qwen_timeout, form.qwen_model_name, form.qwen_api_key])
   }
@@ -514,11 +514,11 @@ async function saveCard(id) {
       const llm_api_mode = analysisTab.value
       payload = { llm_api_mode }
       
-      if (analysisTab.value === 'gemini') {
+      if (analysisTab.value === 'claude') {
         if (form.llm_base_url) payload.llm_base_url = form.llm_base_url
         if (form.llm_timeout) payload.llm_timeout = form.llm_timeout
-        if (form.gemini_model_name) payload.gemini_model_name = form.gemini_model_name
-        if (form.gemini_api_key) payload.gemini_api_key = form.gemini_api_key
+        if (form.claude_model_name) payload.claude_model_name = form.claude_model_name
+        if (form.claude_api_key) payload.claude_api_key = form.claude_api_key
       } else if (analysisTab.value === 'chatgpt') {
         if (form.chatgpt_base_url) payload.chatgpt_base_url = form.chatgpt_base_url
         if (form.chatgpt_timeout) payload.chatgpt_timeout = form.chatgpt_timeout
@@ -606,8 +606,8 @@ function statusOf(key) {
   }
   if (key === 'analysis') {
     // AI模型：只要有一个模型配置了就显示ON
-    const hasAnyModel = form.gemini_api_key || form.chatgpt_api_key || form.qwen_api_key ||
-                       form.gemini_model_name || form.chatgpt_model_name || form.qwen_model_name ||
+    const hasAnyModel = form.claude_api_key || form.chatgpt_api_key || form.qwen_api_key ||
+                       form.claude_model_name || form.chatgpt_model_name || form.qwen_model_name ||
                        form.llm_base_url || form.chatgpt_base_url || form.qwen_base_url
     return hasAnyModel ? { tone: 'ok', text: 'ON' } : { tone: 'off', text: 'OFF' }
   }
@@ -718,12 +718,12 @@ const emailForm = reactive({
   last_sent_date: '',
 })
 
-const analysisTab = ref('gemini')
+const analysisTab = ref('claude')
 const analysisModelLabel = computed(() => {
-  const labels = { gemini: 'Gemini', chatgpt: 'ChatGPT', qwen: '通义千问' }
+  const labels = { claude: 'Claude', chatgpt: 'ChatGPT', qwen: '通义千问' }
   return labels[analysisTab.value] || '未选择'
 })
-const apiKeyHints = reactive({ gemini: '未设置', qwen: '未设置', chatgpt: '未设置' })
+const apiKeyHints = reactive({ claude: '未设置', qwen: '未设置', chatgpt: '未设置' })
 
 // 查词接口（简化为统一接口）
 const searchApiTab = ref('chatgpt')  // 保留兼容，但不再使用
@@ -732,11 +732,11 @@ const form = reactive({
   // 查词接口（统一）
   search_api_url: '',
   search_api_key: '',
-  // AI模型（品牌分析）- Gemini
+  // AI模型（品牌分析）- Claude
   llm_base_url: '',
   llm_timeout: '120',
-  gemini_model_name: '',
-  gemini_api_key: '',
+  claude_model_name: '',
+  claude_api_key: '',
   // AI模型 - ChatGPT
   chatgpt_base_url: '',
   chatgpt_timeout: '120',
@@ -780,7 +780,7 @@ async function loadSettings() {
     simple.forEach(k => { if (data[k] !== undefined) form[k] = data[k] || form[k] })
 
     // 模型名称
-    const models = ['gemini', 'qwen', 'chatgpt']
+    const models = ['claude', 'qwen', 'chatgpt']
     for (const m of models) {
       form[m + '_model_name'] = data[m + '_model_name'] || ''
       form[m + '_api_key'] = ''
@@ -792,8 +792,8 @@ async function loadSettings() {
     form.firecrawl_api_key = ''
 
     // 还原当前启用模式
-    const mode = data.llm_api_mode || 'gemini'
-    analysisTab.value = (mode === 'qwen' || mode === 'chatgpt' || mode === 'gemini') ? mode : 'gemini'
+    const mode = data.llm_api_mode || 'claude'
+    analysisTab.value = (mode === 'qwen' || mode === 'chatgpt' || mode === 'claude') ? mode : 'claude'
 
     // 每卡基线快照（在 analysisTab 还原之后）
     snapshotCards()

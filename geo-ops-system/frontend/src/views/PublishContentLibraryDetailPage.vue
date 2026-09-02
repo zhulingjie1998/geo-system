@@ -295,8 +295,55 @@ function persist() {
 function loadRows() {
   loading.value = true
   try {
+    // 先从 localStorage 加载
     const raw = localStorage.getItem(storageKey())
-    rows.value = raw ? (JSON.parse(raw) || []) : []
+    const localArticles = raw ? (JSON.parse(raw) || []) : []
+    
+    // 同时从数据库加载（智能生文生成的文章）
+    fetch(`/api/content/tasks?account_id=${accountId.value}`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        // 提取数据库中的草稿文章
+        const dbArticles = []
+        if (data.items && Array.isArray(data.items)) {
+          for (const batch of data.items) {
+            if (batch.drafts && Array.isArray(batch.drafts)) {
+              for (const draft of batch.drafts) {
+                if (draft.status === 'done' && draft.title) {
+                  // 检查是否已存在于本地（避免重复）
+                  const exists = localArticles.some(a => 
+                    a.id === draft.id || a.title === draft.title
+                  )
+                  if (!exists) {
+                    dbArticles.push({
+                      id: draft.id,
+                      title: draft.title,
+                      content: '',  // 内容需要单独获取
+                      source: 'ai-generate',
+                      model: batch.llm_model || 'qwen',
+                      language: 'zh',
+                      status: 'draft',
+                      createdAt: batch.created_at,
+                      updatedAt: batch.updated_at,
+                      wordCount: draft.word_count || 0,
+                    })
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        // 合并：数据库文章 + 本地文章（去重）
+        const allArticles = [...dbArticles, ...localArticles]
+        rows.value = allArticles
+        console.log('[内容库] 加载完成:', { local: localArticles.length, db: dbArticles.length, total: allArticles.length })
+      })
+      .catch((err) => {
+        console.warn('[内容库] API加载失败，使用本地数据:', err)
+        // API 失败时只使用本地数据
+        rows.value = localArticles
+      })
   } catch {
     rows.value = []
   } finally {

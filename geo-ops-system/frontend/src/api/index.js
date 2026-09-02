@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const http = axios.create({
   baseURL: '/api',
-  timeout: 30000,
+  timeout: 300000,  // 5分钟 - 支持重试大量失败记录等耗时操作
   withCredentials: true
 })
 

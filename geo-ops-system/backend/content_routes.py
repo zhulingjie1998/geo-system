@@ -39,7 +39,22 @@ def register(app):
     # ============================================================
     @app.post("/api/content/generate-topics")
     def content_generate_topics():
+        # 立即写入日志确认进入此函数
+        try:
+            with open("_content_error.log", "a", encoding="utf-8") as f:
+                f.write(f"\n[{__import__('datetime').datetime.now()}] === ENTER generate_topics ===\n")
+        except:
+            pass
+        
         _require_login()
+        
+        # 写入登录后的日志
+        try:
+            with open("_content_error.log", "a", encoding="utf-8") as f:
+                f.write(f"[{__import__('datetime').datetime.now()}] Login OK, parsing request...\n")
+        except:
+            pass
+        
         data = request.get_json(silent=True) or {}
         try:
             account_id = int(data.get("account_id"))
@@ -52,12 +67,33 @@ def register(app):
         if not keywords:
             return jsonify({"error": "keywords 必填"}), 400
 
+        # 兼容处理：前端可能发送字符串数组 ["word"] 或对象数组 [{"id":x, "word":"xxx"}]
+        if keywords and isinstance(keywords[0], str):
+            keywords = [{"id": i, "word": kw} for i, kw in enumerate(keywords)]
+
         kb_modules = data.get("kb_modules") or []
         count = int(data.get("count") or 1)
         prompt = data.get("prompt") or ""
 
-        topics = svc.generate_topics(account_id, keywords, kb_modules, count, prompt)
-        return jsonify({"topics": topics})
+        try:
+            topics = svc.generate_topics(account_id, keywords, kb_modules, count, prompt)
+            return jsonify({"topics": topics})
+        except Exception as e:
+            logger.exception("[content] generate_topics failed: %s", e)
+            # 写入详细错误到文件
+            try:
+                import traceback as tb
+                with open("_content_error.log", "a", encoding="utf-8") as f:
+                    f.write(f"\n[{__import__('datetime').datetime.now()}] generate_topics ERROR:\n")
+                    f.write(f"  Type: {type(e).__name__}\n")
+                    f.write(f"  Message: {str(e)}\n")
+                    f.write(f"  Traceback:\n{tb.format_exc()}\n")
+            except:
+                pass
+            return jsonify({
+                "error": str(e)[:500],
+                "error_type": type(e).__name__,
+            }), 500
 
     # ============================================================
     # POST /api/content/generate
@@ -83,10 +119,27 @@ def register(app):
         topic_angle = data.get("topic_angle") or ""
         supplement = data.get("supplement") or ""
         kb_module_ids = data.get("kb_module_ids") or []
+        language = (data.get("language") or "").strip() or "zh-CN"  # 输出语言，默认中文
         metadata = data.get("metadata") or {}
 
         # 注入 user_id
         metadata["user_id"] = session.get("user_id", 0)
+
+        # 详细日志 - 记录请求参数
+        logger.info(
+            "[content] generate request: account_id=%s model=%s keyword=%s topic=%s "
+            "kb_module_ids=%s instruction_len=%d supplement_len=%d",
+            account_id, model, keyword[:50] if keyword else '',
+            topic_title[:50] if topic_title else '',
+            kb_module_ids, len(instruction), len(supplement),
+        )
+
+        # 同时写入文件日志以便调试
+        try:
+            with open("_content_error.log", "a", encoding="utf-8") as f:
+                f.write(f"\n[{__import__('datetime').datetime.now()}] REQUEST: account_id={account_id}, model={model}, topic={topic_title[:50]}\n")
+        except:
+            pass
 
         try:
             result = svc.generate_article(
@@ -98,12 +151,35 @@ def register(app):
                 topic_angle=topic_angle,
                 supplement=supplement,
                 kb_module_ids=kb_module_ids,
+                language=language,  # 输出语言
                 metadata=metadata,
             )
             return jsonify(result)
         except Exception as e:
             logger.exception("[content] generate failed: %s", e)
-            return jsonify({"error": str(e)[:500]}), 500
+            error_msg = str(e)
+            
+            # 写入详细错误到文件
+            try:
+                import traceback as tb
+                with open("_content_error.log", "a", encoding="utf-8") as f:
+                    f.write(f"[ERROR] {type(e).__name__}: {error_msg}\n")
+                    f.write(f"{tb.format_exc()}\n")
+            except:
+                pass
+            
+            # 返回更详细的错误信息
+            return jsonify({
+                "error": error_msg[:500],
+                "error_type": type(e).__name__,
+                "debug_info": {
+                    "account_id": account_id,
+                    "model": model,
+                    "topic_title_len": len(topic_title) if topic_title else 0,
+                    "instruction_len": len(instruction) if instruction else 0,
+                    "kb_module_ids_count": len(kb_module_ids) if kb_module_ids else 0,
+                }
+            }), 500
 
     # ============================================================
     # GET /api/content/tasks — 列出批次

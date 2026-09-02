@@ -642,6 +642,12 @@ const filteredAccounts = computed(() => {
 })
 
 watch([searchText, filterStatus, filterPlatform, scope], () => { currentPage.value = 1 })
+watch(filteredAccounts, () => {
+  const totalPages = Math.max(1, Math.ceil(filteredAccounts.value.length / pageSize))
+  if (currentPage.value < 1) currentPage.value = 1
+  if (currentPage.value > totalPages) currentPage.value = totalPages
+  if (!filteredAccounts.value.length) currentPage.value = 1
+}, { flush: 'post' })
 
 const pagedAccounts = computed(() => {
   const start = (currentPage.value - 1) * pageSize
@@ -711,6 +717,13 @@ async function restoreExpandedRows() {
   pagedAccounts.value
     .filter(r => ids.includes(r.id))
     .forEach(r => tableRef.value.toggleRowExpansion(r, true))
+}
+
+function clearAccountTaskCache(accountId) {
+  if (!accountId) return
+  delete tasksLoading[accountId]
+  delete tasksByAccount[accountId]
+  delete taskPage[accountId]
 }
 
 async function loadAccountTasks(accountId) {
@@ -803,9 +816,24 @@ async function deleteHistoryDate(row, t) {
   try {
     const r = await api.deleteSearchHistory(row.id, date)
     ElMessage.success(`已删除 ${r?.deleted ?? ''} 条查词记录`)
+    clearAccountTaskCache(row.id)
+    // Keep expanded state in sessionStorage for this row
+    try {
+      const raw = sessionStorage.getItem(EXPANDED_STORAGE_KEY)
+      const ids = raw ? JSON.parse(raw) : []
+      if (!ids.includes(row.id)) {
+        ids.push(row.id)
+        sessionStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify(ids))
+      }
+    } catch {}
+    currentPage.value = 1
     await loadData()
-    delete tasksLoading[row.id]
-    delete tasksByAccount[row.id]
+    // Restore expansion and reload tasks
+    await nextTick()
+    if (tableRef.value) {
+      tableRef.value.toggleRowExpansion(row, true)
+    }
+    await loadAccountTasks(row.id)
   } catch (e) {
     ElMessage.error(e?.response?.data?.error || e?.message || '删除失败')
   }
@@ -862,9 +890,23 @@ async function deleteAllHistory(row) {
   try {
     const r = await api.deleteAllSearchHistory(row.id)
     ElMessage.success(`已清空全部历史：${r?.deletedDates ?? days} 天 · ${r?.deletedRows ?? '?'} 条结果`)
+    clearAccountTaskCache(row.id)
+    // Keep expanded state to show "no history" message
+    try {
+      const raw = sessionStorage.getItem(EXPANDED_STORAGE_KEY)
+      const ids = raw ? JSON.parse(raw) : []
+      if (!ids.includes(row.id)) {
+        ids.push(row.id)
+        sessionStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify(ids))
+      }
+    } catch {}
+    currentPage.value = 1
     await loadData()
-    delete tasksLoading[row.id]
-    delete tasksByAccount[row.id]
+    // Restore expansion (tasks will be empty, showing "no history")
+    await nextTick()
+    if (tableRef.value) {
+      tableRef.value.toggleRowExpansion(row, true)
+    }
   } catch (e) {
     ElMessage.error(e?.response?.data?.error || e?.message || '删除失败')
   }
@@ -1027,8 +1069,13 @@ async function loadData() {
   try {
     const accs = await api.getAccountSummary(isSuperAdmin.value)
     accounts.value = accs || []
+    const totalPages = Math.max(1, Math.ceil(filteredAccounts.value.length / pageSize))
+    if (currentPage.value < 1) currentPage.value = 1
+    if (currentPage.value > totalPages) currentPage.value = totalPages
+    if (!filteredAccounts.value.length) currentPage.value = 1
   } catch {
     accounts.value = []
+    currentPage.value = 1
   } finally {
     loading.value = false
   }

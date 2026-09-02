@@ -276,12 +276,12 @@ def extract_content_meta(markdown: str, settings: dict) -> dict:
     if not markdown or not markdown.strip():
         return {"pub_date": "", "content_type": "", "website_type": ""}
 
-    mode = settings.get("llm_api_mode", "gemini")
+    mode = settings.get("llm_api_mode", "qwen")  # 默认使用通义千问
     # 各模式独立 base_url:qwen 必须走 dashscope(qwen_base_url),不能用网关 llm_base_url(否则 dashscope key 发给网关→401)。
     # 与 brand_analyzer._call_llm 保持一致(此前漏了这步,是 qwen 抽取 401 的根因)。
     base_url = (settings.get(f"{mode}_base_url") or settings.get("llm_base_url", "")).rstrip("/")
     api_key = settings.get(f"{mode}_api_key") or settings.get("llm_api_key", "")
-    model = settings.get(f"{mode}_model_name") or settings.get("llm_model_name", "gemini-3-flash-preview")
+    model = settings.get(f"{mode}_model_name") or settings.get("llm_model_name", "qwen-plus")  # 默认通义千问
     timeout = int(settings.get("llm_timeout", "300"))
 
     if not api_key:
@@ -293,7 +293,25 @@ def extract_content_meta(markdown: str, settings: dict) -> dict:
 
     try:
         with httpx.Client(timeout=timeout, trust_env=False) as client:
-            if mode == "gemini":
+            if mode == "claude":
+                # Claude Messages API
+                claude_base = base_url.rstrip("/")
+                if claude_base.endswith("/v1/messages"):
+                    claude_base = claude_base[:-len("/v1/messages")]
+                elif claude_base.endswith("/messages"):
+                    claude_base = claude_base[:-len("/messages")]
+                url = f"{claude_base}/v1/messages"
+                payload = {
+                    "model": model,
+                    "max_tokens": 2000,
+                    "messages": [{"role": "user", "content": user_content}],
+                }
+                resp = client.post(url, json=payload, headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                })
+            elif mode == "gemini":
                 url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
                 payload = {
                     "contents": [{"role": "user", "parts": [{"text": user_content}]}],
@@ -313,7 +331,12 @@ def extract_content_meta(markdown: str, settings: dict) -> dict:
             resp.raise_for_status()
             data = resp.json()
 
-            if mode == "gemini":
+            if mode == "claude":
+                raw = ""
+                for block in data.get("content", []):
+                    if block.get("type") == "text":
+                        raw += block.get("text", "")
+            elif mode == "gemini":
                 raw = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
             else:
                 raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")

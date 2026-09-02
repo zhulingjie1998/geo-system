@@ -208,7 +208,7 @@ async function restoreActiveTasks() {
           accountId: t.account_id,
           accountName: t.account_name || '',
           hint: t.hint || 'AI 正在生成知识库...',
-          text: '任务恢复中...',
+          text: '正在获取任务进度...',
           phase: 'llm',
           percent: 0,
           taskType: t.task_type || 'generate',

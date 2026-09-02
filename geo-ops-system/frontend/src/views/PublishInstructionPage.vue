@@ -234,6 +234,7 @@
               <el-button size="small" @click="insertVariable('{user_instruction}')">{user_instruction}</el-button>
               <el-button size="small" @click="insertVariable('{word_min}')">{word_min}</el-button>
               <el-button size="small" @click="insertVariable('{word_max}')">{word_max}</el-button>
+              <el-button size="small" @click="insertVariable('{language}')">{language}</el-button>
             </div>
           </div>
 
@@ -256,7 +257,8 @@
             <code>{topic}</code>主题 ·
             <code>{user_instruction}</code>个性化要求 ·
             <code>{word_min}</code>最小字数 ·
-            <code>{word_max}</code>最大字数
+            <code>{word_max}</code>最大字数 ·
+            <code>{language}</code>输出语言
           </div>
         </el-form-item>
       </el-form>
@@ -293,12 +295,12 @@ const promptInputRef = ref() // Prompt输入框引用
 const editingId = ref(null)
 
 // 需要检查的变量列表
-const requiredVariables = ['{brand}', '{kb_content}', '{topic}', '{user_instruction}', '{word_min}', '{word_max}']
+const requiredVariables = ['{brand}', '{kb_content}', '{topic}', '{user_instruction}', '{word_min}', '{word_max}']  // {language} 是可选变量，不强制要求
 
 // 指令列表数据
 const instructions = ref([])
 
-// 可用LLM模型列表（后续可从系统设置获取）
+// 可用LLM模型列表（从系统设置获取）
 const availableModels = ref([
   { value: 'qwen-plus', label: '通义千问' },
 ])
@@ -312,13 +314,26 @@ async function loadDefaultModel() {
     const res = await fetch('/api/settings')
     if (res.ok) {
       const data = await res.json()
-      // 优先使用通义千问的model_name
-      if (data.qwen_model_name) {
-        defaultModel.value = data.qwen_model_name
-        availableModels.value = [
-          { value: data.qwen_model_name, label: data.qwen_model_name }
-        ]
+      const options = []
+      // Claude
+      if (data.claude_api_key) {
+        options.push({ value: data.claude_model_name || 'claude-sonnet-4-20250514', label: 'Claude' })
       }
+      // ChatGPT
+      if (data.chatgpt_api_key) {
+        options.push({ value: data.chatgpt_model_name || 'gpt-4o-mini', label: 'ChatGPT' })
+      }
+      // 通义千问
+      if (data.qwen_api_key) {
+        options.push({ value: data.qwen_model_name || 'qwen-plus', label: '通义千问' })
+      }
+      if (options.length === 0) {
+        options.push({ value: 'qwen-plus', label: '通义千问' })
+      }
+      availableModels.value = options
+      // 默认选当前启用的模型
+      const mode = data.llm_api_mode || 'claude'
+      defaultModel.value = data[`${mode}_model_name`] || options[0].value
     }
   } catch (e) {
     console.warn('加载模型设置失败，使用默认值')
