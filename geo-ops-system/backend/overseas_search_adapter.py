@@ -27,7 +27,10 @@ import httpx
 import db
 from platforms import PLATFORM_MODEL_MAP, _normalize_platforms
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("gunicorn.error") if logging.getLogger("gunicorn.error").handlers else logging.getLogger(__name__)
+# 使用 gunicorn.error logger 确保在 Gunicorn 环境下所有级别日志能正确输出
+# gunicorn.error logger 由 Gunicorn 配置，输出到 --error-logfile 指定的文件
+# 在非 Gunicorn 环境（如本地开发）回退到 __name__ logger
 
 # ═══════════════════════════════════════════
 # Ka 接口配置（固定，无需系统设置）
@@ -59,34 +62,57 @@ MAX_CONCURRENT_SUBMITS = 5  # 最大并发提交批次数
 PARALLEL_POLL_START_DELAY = 10  # 提交开始后多少秒启动轮询线程（秒）
 
 # 截图补全配置
-SCREENSHOT_MAX_WAIT = 600  # 截图最大等待时间（10分钟，适应大规模任务）
+SCREENSHOT_MAX_WAIT = 1800  # 截图最大等待时间（30分钟，KA API截图生成较慢）
 SCREENSHOT_POLL_INTERVAL = 15  # 截图轮询间隔（秒）
 SCREENSHOT_SUCCESS_STATUSES = ("COMPLETED", "RENDERING")  # 有文本内容即视为成功
+SCREENSHOT_RESCUE_INTERVAL = 300  # 后台截图补救检查间隔（5分钟）
+SCREENSHOT_RESCUE_MAX_AGE_HOURS = 24  # 补救最近24小时内的缺失截图
 
 # 最终等待配置（QUEUED/RENDERING任务）
-FINAL_PENDING_MAX_WAIT = 300  # 最终等待未完成任务的最大时间（5分钟）
+FINAL_PENDING_MAX_WAIT = 900  # 最终等待未完成任务的最大时间（15分钟，适应KA API排队）
 FINAL_PENDING_POLL_INTERVAL = 10  # 最终等待期间的轮询间隔
+
+# 重新提交配置（自提交后超时未返回的任务）
+RESUBMIT_THRESHOLD_SECONDS = 600  # 自提交后超过10分钟仍未返回结果的任务，重新提交
+RESUBMIT_MAX_ROUNDS = 2  # 每个任务最多重新提交次数（防止无限循环）
 
 # 重试配置
 MAX_RETRIES = 3          # 最大重试次数
 RETRY_DELAY = 5          # 重试间隔秒数
+AUTO_RETRY_MAX_ROUNDS = 2  # 终态失败的自动重试轮数
+AUTO_RETRY_POLL_MAX_WAIT = 600  # 每轮自动重试最多等待10分钟
 
 # 大规模任务阈值
 LARGE_TASK_THRESHOLD = 500  # 超过此数量视为大规模任务
 
 
+def _calc_dynamic_timeout(task_count: int, base: int, per_task: int, cap: int) -> int:
+    """根据任务数量动态计算超时时间。
+    
+    KA API 处理大批量任务时需要更长时间（提交+排队+渲染），
+    固定超时会导致大批量任务被误判为超时失败。
+    
+    Args:
+        task_count: 任务总数
+        base: 基础超时（秒）
+        per_task: 每个任务额外增加的超时（秒）
+        cap: 最大超时上限（秒）
+    """
+    return min(cap, base + task_count * per_task)
+
+
 def _ka_post(endpoint: str, payload: dict, timeout: int = 60) -> dict:
     """向 Ka 接口发送 POST 请求，返回 data 字段或抛异常。带自动重试。"""
     url = KA_BASE_URL.rstrip("/") + "/" + endpoint.lstrip("/")
-    print(f"[DEBUG-KA-POST] 请求: {endpoint}, timeout={timeout}", flush=True)
+    logger.debug("[DEBUG-KA-POST] 请求: %s, timeout=%d", endpoint, timeout)
     last_exc = None
     for attempt in range(1, MAX_RETRIES + 1):
         body = None
         try:
-            print(f"[DEBUG-KA-POST] 尝试 {attempt}/{MAX_RETRIES}: 发送HTTP请求...", flush=True)
+            logger.debug("[DEBUG-KA-POST] 尝试 %d/%d: 发送HTTP请求...", attempt, MAX_RETRIES)
             with httpx.Client(timeout=timeout, trust_env=False) as client:
                 resp = client.post(url, json=payload)
-            print(f"[DEBUG-KA-POST] HTTP响应: status={resp.status_code}", flush=True)
+            logger.debug("[DEBUG-KA-POST] HTTP响应: status=%d", resp.status_code)
             resp.raise_for_status()
             body = resp.json()
         except httpx.HTTPStatusError as e:
@@ -140,25 +166,59 @@ def submit_ka_tasks(tasks: list[dict]) -> list[dict]:
         else:
             ka_platform = PLATFORM_KA_MAP.get(p, p)
         language = t.get("language", "en")
-        if ka_platform == "gemini" and language in ("", None, "en"):
-            language = "US"
+        # 语言代码到国家/地区代码的映射表（仅用于Gemini平台）
+        # 参考Java端 AcceptLanguageByRegionEnum 枚举定义
+        # KA接口的language参数：Gemini需要国家代码(US/CN)，其他平台使用标准语言代码(en/zh)
+        LANGUAGE_TO_REGION = {
+            "en": "US",   # 英语 → 美国
+            "zh": "CN",   # 中文 → 中国
+            "ja": "JP",   # 日语 → 日本
+            "ko": "KR",   # 韩语 → 韩国
+            "de": "DE",   # 德语 → 德国
+            "fr": "FR",   # 法语 → 法国
+            "es": "ES",   # 西班牙语 → 西班牙
+            "pt": "PT",   # 葡萄牙语 → 葡萄牙
+            "ru": "RU",   # 俄语 → 俄罗斯
+            "ar": "AE",   # 阿拉伯语 → 阿联酋
+            "it": "IT",   # 意大利语 → 意大利
+            "nl": "NL",   # 荷兰语 → 荷兰
+            "pl": "PL",   # 波兰语 → 波兰
+            "tr": "TR",   # 土耳其语 → 土耳其
+            "th": "TH",   # 泰语 → 泰国
+            "vi": "VN",   # 越南语 → 越南
+            "id": "ID",   # 印尼语 → 印尼
+            "ms": "MY",   # 马来语 → 马来西亚
+        }
+        # 只有Gemini平台需要将语言代码转换为国家代码
+        if ka_platform == "gemini":
+            if language and len(language) == 2 and language.islower():
+                language = LANGUAGE_TO_REGION.get(language, language.upper())
+            if not language:
+                language = "US"  # Gemini默认美国
+            else:
+                language = language.upper()  # 确保大写
+        else:
+            # 其他平台保持标准语言代码（en, zh, ja等）
+            if not language:
+                language = "en"  # 其他平台默认英语
         normalized.append({
             "keyword": t["keyword"],
             "platform": ka_platform,
             "language": language,
+            "priority": 10,  # 接口文档要求固定传10
         })
     all_results = []
-    print(f"[DEBUG-KA] submit_ka_tasks: 共 {len(normalized)} 个任务, 分批处理", flush=True)
+    logger.debug("[DEBUG-KA] submit_ka_tasks: 共 %d 个任务, 分批处理", len(normalized))
     for i in range(0, len(normalized), BATCH_SIZE):
         batch = normalized[i:i + BATCH_SIZE]
-        print(f"[DEBUG-KA] 提交批次 {i//BATCH_SIZE+1}: {len(batch)} 个任务", flush=True)
+        logger.debug("[DEBUG-KA] 提交批次 %d: %d 个任务", i//BATCH_SIZE+1, len(batch))
         data = _ka_post("/firecrawl/kaTaskBatchSubmit", {"tasks": batch}, timeout=120)
-        print(f"[DEBUG-KA] 批次 {i//BATCH_SIZE+1} 返回: {type(data)}, 长度={len(data) if isinstance(data, list) else 1}", flush=True)
+        logger.debug("[DEBUG-KA] 批次 %d 返回: %s, 长度=%d", i//BATCH_SIZE+1, type(data), len(data) if isinstance(data, list) else 1)
         if isinstance(data, list):
             all_results.extend(data)
         else:
             all_results.append(data)
-    print(f"[DEBUG-KA] submit_ka_tasks 完成: 共返回 {len(all_results)} 个结果", flush=True)
+    logger.debug("[DEBUG-KA] submit_ka_tasks 完成: 共返回 %d 个结果", len(all_results))
     return all_results
 
 
@@ -194,13 +254,13 @@ def poll_ka_until_complete(local_task_ids: list[int],
     start = time.time()
     pending = set(local_task_ids)
     final_map = {}
-    print(f"[DEBUG-KA-POLL] poll_ka_until_complete 开始: {len(pending)} 个任务, max_wait={max_wait}s", flush=True)
+    logger.debug("[DEBUG-KA-POLL] poll_ka_until_complete 开始: %d 个任务, max_wait=%ds", len(pending), max_wait)
     while pending and (time.time() - start) < max_wait:
         batch = list(pending)
-        print(f"[DEBUG-KA-POLL] 轮询中... 剩余 {len(pending)} 个, 已用时 {time.time()-start:.1f}s", flush=True)
+        logger.debug("[DEBUG-KA-POLL] 轮询中... 剩余 %d 个, 已用时 %.1fs", len(pending), time.time()-start)
         try:
             results = query_ka_detail(batch)
-            print(f"[DEBUG-KA-POLL] 查询返回 {len(results)} 条结果", flush=True)
+            logger.debug("[DEBUG-KA-POLL] 查询返回 %d 条结果", len(results))
         except Exception as e:
             logger.warning("[Ka] query_ka_detail failed: %s, retrying...", e)
             time.sleep(5)
@@ -233,12 +293,116 @@ def poll_ka_until_complete(local_task_ids: list[int],
     return list(final_map.values())
 
 
+def poll_ka_with_resubmit(local_task_ids: list,
+                          tasks_meta: list = None,
+                          submit_idx: dict = None,
+                          resubmit_counts: dict = None,
+                          interval: float = POLL_INTERVAL,
+                          max_wait: float = POLL_MAX_WAIT,
+                          heartbeat_cb=None,
+                          threshold: int = RESUBMIT_THRESHOLD_SECONDS,
+                          max_rounds: int = RESUBMIT_MAX_ROUNDS) -> list:
+    """poll_ka_until_complete 的增强版：等待期间对超时未返回的任务自动重新推送。
+
+    与主任务 _run_task_worker_ka 最终等待循环的重推逻辑一致：
+    - QUEUED/RENDERING 超过 threshold 秒，或在 KA 响应中完全缺失 → 重新提交
+    - 每个原始任务最多重推 max_rounds 次；新任务ID接管等待，总查询数不变
+    - 新任务完成后其结果回填到原始任务ID上（调用方按原始ID保存即可）
+
+    Args:
+        local_task_ids: 原始提交的 localTaskId 列表
+        tasks_meta: 与 local_task_ids 按下标对齐的 [{"keyword","platform"}]，仅在 submit_idx 缺失某ID时补齐
+        submit_idx: localTaskId -> {"keyword","platform","submit_time"}，函数会原地更新（新任务ID也写入）
+        resubmit_counts: 原始localTaskId -> 已重推次数，函数原地更新（调用方用于 attempt 统计）
+        heartbeat_cb: heartbeat_cb(done_count) 每轮轮询后调用，供调用方更新任务心跳/进度
+    Returns:
+        与 poll_ka_until_complete 一致: [{"localTaskId","status","result",...}, ...]，仅含原始任务ID
+    """
+    start = time.time()
+    pending = set(tid for tid in local_task_ids if tid is not None)
+    final_map = {}
+    alias = {}  # 新任务ID -> 原始任务ID
+    resubmit_counts = resubmit_counts if resubmit_counts is not None else {}
+    submit_idx = submit_idx if submit_idx is not None else {}
+    if tasks_meta:
+        for _i, tid in enumerate(local_task_ids):
+            if tid is not None and tid not in submit_idx and _i < len(tasks_meta):
+                _m = tasks_meta[_i]
+                submit_idx[tid] = {"keyword": _m.get("keyword", ""), "platform": _m.get("platform", ""), "submit_time": start}
+
+    while pending and (time.time() - start) < max_wait:
+        try:
+            results = query_ka_detail(list(pending))
+        except Exception as e:
+            logger.warning("[Ka] query_ka_detail failed: %s, retrying...", e)
+            time.sleep(5)
+            continue
+        _by_id = {}
+        for r in results:
+            _t = r.get("localTaskId")
+            if _t is not None:
+                _by_id[_t] = r
+        _still = []
+        for tid in list(pending):
+            r = _by_id.get(tid)
+            st = (r or {}).get("status", "")
+            if st in ("COMPLETED", "FAILED"):
+                pending.discard(tid)
+                final_map[tid] = r
+                continue
+            info = submit_idx.get(tid, {})
+            stime = info.get("submit_time", 0)
+            if (st in ("QUEUED", "RENDERING") or r is None) and stime and (time.time() - stime) >= threshold:
+                orig = alias.get(tid, tid)
+                _round = resubmit_counts.get(orig, 0)
+                if _round < max_rounds:
+                    try:
+                        new_results = submit_ka_tasks([{"keyword": info.get("keyword", ""), "platform": info.get("platform", ""), "language": "en"}])
+                        new_id = (new_results[0].get("localTaskId") if new_results else None)
+                        if new_id:
+                            resubmit_counts[orig] = _round + 1
+                            submit_idx[new_id] = {"keyword": info.get("keyword", ""), "platform": info.get("platform", ""), "submit_time": time.time()}
+                            alias[new_id] = orig
+                            pending.discard(tid)
+                            pending.add(new_id)
+                            final_map[orig] = {"localTaskId": orig, "status": "FAILED",
+                                               "errorMessage": "超过%d秒未返回，已重新推送(第%d次)" % (threshold, _round + 1)}
+                            logger.warning("[Ka] 任务 %s 超时未返回(%.0fs, %s/%s)，已重新推送(第%d次) -> 新ID %s",
+                                           tid, time.time() - stime, info.get("platform", ""), (info.get("keyword", "") or "")[:30], _round + 1, new_id)
+                            continue
+                    except Exception as e:
+                        logger.error("[Ka] 重新提交任务 %s 失败: %s", tid, e)
+            _still.append(tid)
+        pending = set(_still)
+        if heartbeat_cb:
+            try:
+                _orig_pending = [t for t in pending if t not in alias]
+                heartbeat_cb(len(local_task_ids) - len(_orig_pending))
+            except Exception:
+                pass
+        if pending:
+            remaining = max_wait - (time.time() - start)
+            wait = min(interval, remaining)
+            if wait > 0:
+                time.sleep(wait)
+
+    # 收尾：仍在等待的原始任务标记失败（新任务ID不单独落记录，由回填覆盖）
+    for tid in list(pending):
+        if alias.get(tid, tid) == tid:
+            final_map[tid] = {"localTaskId": tid, "status": "FAILED", "errorMessage": "轮询超时"}
+    # 新任务ID的最终结果回填到原始任务ID
+    for new_id, orig in alias.items():
+        if new_id in final_map:
+            final_map[orig] = final_map[new_id]
+    return [final_map[tid] for tid in local_task_ids if tid in final_map]
+
+
 def run_query(platform: str, model: str, keyword: str,
               brand: str = "", settings: dict | None = None) -> dict:
     """执行单条查询（同步包装 Ka 异步接口）。提交→轮询→返回结果。"""
     start = time.time()
     ka_platform = PLATFORM_KA_MAP.get(platform, model)
-    language = "US" if ka_platform == "gemini" else "en"
+    language = "en"  # 所有平台统一使用 en（KA API 标准语言码）
     try:
         submit_result = _ka_post("/firecrawl/kaTaskSubmit", {
             "keyword": keyword,
@@ -326,7 +490,8 @@ def _escape_html(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 def _complete_screenshots(task_id: str, task_ids: list, submit_idx: dict, kw_map: dict, 
-                          keywords: list, account_id: int, search_date: str):
+                          keywords: list, account_id: int, search_date: str,
+                          max_wait: int = SCREENSHOT_MAX_WAIT):
     """异步补全截图：对 RENDERING 状态的任务持续轮询直到有截图或超时。
     
     Args:
@@ -338,12 +503,12 @@ def _complete_screenshots(task_id: str, task_ids: list, submit_idx: dict, kw_map
         account_id: 客户ID
         search_date: 搜索日期
     """
-    logger.info("[Ka-Screenshot] 截图补全线程启动，%d 条任务，最大等待 %ds", len(task_ids), SCREENSHOT_MAX_WAIT)
+    logger.info("[Ka-Screenshot] 截图补全线程启动，%d 条任务，最大等待 %ds", len(task_ids), max_wait)
     
     start_time = time.time()
     pending_ids = list(task_ids)  # 待补全的ID列表
     
-    while pending_ids and (time.time() - start_time) < SCREENSHOT_MAX_WAIT:
+    while pending_ids and (time.time() - start_time) < max_wait:
         # 批量查询状态
         try:
             results = query_ka_detail(pending_ids)
@@ -397,27 +562,146 @@ def _complete_screenshots(task_id: str, task_ids: list, submit_idx: dict, kw_map
             logger.info("[Ka-Screenshot] 本轮完成 %d 条，剩余 %d 条", len(newly_completed), len(pending_ids))
         
         if pending_ids:
+            elapsed = int(time.time() - start_time)
+            logger.debug("[Ka-Screenshot] 轮询中: 剩余 %d 条, 已等待 %ds/%ds", len(pending_ids), elapsed, max_wait)
             time.sleep(SCREENSHOT_POLL_INTERVAL)
     
-    # 处理超时的任务
+    # 处理超时的任务：不写 "TIMEOUT" 字符串到 screenshot_url，保留空值
+    # 前端通过 screenshot_url 为空判断截图未就绪，不会显示异常的 "TIMEOUT" 文本
     if pending_ids:
         elapsed = int(time.time() - start_time)
-        logger.warning("[Ka-Screenshot] %d 条任务截图超时(%ds)，标记为加载失败", len(pending_ids), elapsed)
-        for tid in pending_ids:
-            info = submit_idx.get(tid, {})
-            keyword = info.get("keyword", "")
-            platform = info.get("platform", "")
-            try:
-                db.update_search_result_screenshot(
-                    task_id=task_id,
-                    platform=platform,
-                    keyword=keyword,
-                    screenshot_url="TIMEOUT"  # 特殊标记：超时
-                )
-            except Exception as e:
-                logger.error("[Ka-Screenshot] 标记超时失败: %s", e)
+        logger.warning("[Ka-Screenshot] %d 条任务截图超时(%ds)，保留空截图URL，后台补救线程将继续处理", len(pending_ids), elapsed)
     
     logger.info("[Ka-Screenshot] 截图补全线程结束")
+
+
+# ═══════════════════════════════════════════
+# 后台截图补救线程：定期检查并补全缺失的截图
+# ═══════════════════════════════════════════
+
+_screenshot_rescue_running = False
+_screenshot_rescue_lock = threading.Lock()
+
+def _screenshot_rescue_worker():
+    """后台截图补救线程：定期查询数据库中缺失截图的成功记录，
+    向KA API查询截图URL并更新数据库。
+    
+    解决问题：截图补全线程超时后，KA API可能仍在生成截图，
+    此线程会持续检查并补全。
+    """
+    global _screenshot_rescue_running
+    logger.info("[Ka-Screenshot-Rescue] 后台截图补救线程启动，间隔 %ds", SCREENSHOT_RESCUE_INTERVAL)
+    
+    import pymysql as _pymysql
+    
+    while _screenshot_rescue_running:
+        conn = None
+        try:
+            # 使用独立连接（不依赖线程本地存储）
+            conn = _pymysql.connect(**db._MYSQL_CONFIG)
+            cursor = conn.cursor()
+            
+            # 查询最近24小时内缺失截图的成功记录
+            cursor.execute("""
+                SELECT task_id, platform, keyword, response_json 
+                FROM search_result 
+                WHERE success=1 
+                  AND (screenshot_url IS NULL OR screenshot_url = '')
+                  AND search_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+                LIMIT 200
+            """, (SCREENSHOT_RESCUE_MAX_AGE_HOURS // 24 + 1))
+            rows = cursor.fetchall()
+            cursor.close()
+            
+            if not rows:
+                conn.close()
+                conn = None
+                time.sleep(SCREENSHOT_RESCUE_INTERVAL)
+                continue
+            
+            logger.info("[Ka-Screenshot-Rescue] 发现 %d 条缺失截图的记录，开始补救...", len(rows))
+            
+            # 收集所有 localTaskId
+            task_map = {}  # localTaskId -> [(task_id, platform, keyword), ...]
+            for row in rows:
+                try:
+                    rj = json.loads(row.get("response_json", "") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue  # 跳过无效JSON的记录
+                lid = rj.get("localTaskId")
+                if lid:
+                    task_map.setdefault(lid, []).append((row["task_id"], row["platform"], row["keyword"]))
+            
+            if not task_map:
+                conn.close()
+                conn = None
+                time.sleep(SCREENSHOT_RESCUE_INTERVAL)
+                continue
+            
+            # 分批查询KA API
+            all_ids = list(task_map.keys())
+            recovered = 0
+            for i in range(0, len(all_ids), 30):
+                batch = all_ids[i:i+30]
+                try:
+                    results = query_ka_detail(batch)
+                    for r in results:
+                        tid = r.get("localTaskId")
+                        if not tid or tid not in task_map:
+                            continue
+                        
+                        status = r.get("status", "")
+                        screenshot_url = r.get("screenshotUrl", "") or ((r.get("result") or {}).get("remotePath", "") or "")
+                        
+                        if screenshot_url:
+                            # 更新数据库
+                            for (task_id, platform, keyword) in task_map[tid]:
+                                try:
+                                    db.update_search_result_screenshot(
+                                        task_id=task_id,
+                                        platform=platform,
+                                        keyword=keyword,
+                                        screenshot_url=screenshot_url
+                                    )
+                                    recovered += 1
+                                except Exception as e:
+                                    logger.error("[Ka-Screenshot-Rescue] 更新截图失败: %s (task=%s)", e, tid)
+                except Exception as e:
+                    logger.warning("[Ka-Screenshot-Rescue] 批次查询失败: %s", e)
+                
+                time.sleep(1)  # 批次间延迟
+            
+            conn.close()
+            conn = None
+            
+            if recovered > 0:
+                logger.info("[Ka-Screenshot-Rescue] 本轮补救完成，恢复了 %d 条截图", recovered)
+            else:
+                logger.debug("[Ka-Screenshot-Rescue] 本轮无新截图可用")
+            
+        except Exception as e:
+            logger.error("[Ka-Screenshot-Rescue] 补救线程异常: %s", e)
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        
+        time.sleep(SCREENSHOT_RESCUE_INTERVAL)
+    
+    logger.info("[Ka-Screenshot-Rescue] 后台截图补救线程结束")
+
+
+def start_screenshot_rescue():
+    """启动后台截图补救线程（如果尚未启动）。"""
+    global _screenshot_rescue_running
+    with _screenshot_rescue_lock:
+        if _screenshot_rescue_running:
+            return
+        _screenshot_rescue_running = True
+        t = threading.Thread(target=_screenshot_rescue_worker, daemon=True)
+        t.start()
+        logger.info("[Ka-Screenshot-Rescue] 后台截图补救线程已启动")
 
 
 def _resolve_keywords(account_id: int, override_keywords) -> list[dict]:
@@ -444,9 +728,7 @@ def start_search_for_account_async(account_id: int, override_models=None, overri
     account = db.get_account(account_id)
     if not account:
         raise ValueError("账户不存在")
-    logger.warning("[DEBUG-ADAPTER] override_models=%s, account.platforms=%s", override_models, account.get("platforms"))
     platforms = _normalize_platforms(override_models or account.get("platforms") or [])
-    logger.warning("[DEBUG-ADAPTER] after normalize=%s, PLATFORM_MODEL_MAP keys=%s", platforms, list(PLATFORM_MODEL_MAP.keys()))
     platforms = [p for p in platforms if p in PLATFORM_MODEL_MAP]
     if not platforms:
         raise ValueError("请先为该客户配置查询平台")
@@ -458,11 +740,9 @@ def start_search_for_account_async(account_id: int, override_models=None, overri
         existing_platforms = db.get_today_platforms_for_account(account_id, today)
         stale_platforms = sorted(existing_platforms - set(platforms))
         if stale_platforms:
-            logger.warning("[DEBUG-ADAPTER] 清理同日旧平台结果: account_id=%s stale=%s keep=%s", account_id, stale_platforms, platforms)
             db.delete_today_results_for_platforms(account_id, today, stale_platforms)
     except Exception as e:
-        logger.warning("[DEBUG-ADAPTER] 清理旧平台结果失败，继续执行: %s", e)
-
+        logger.warning("清理旧平台结果失败，继续执行: %s", e)
     keywords = _resolve_keywords(account_id, override_keywords)
     if not keywords:
         raise ValueError("该客户尚未配置关键词（提示词）")
@@ -473,6 +753,95 @@ def start_search_for_account_async(account_id: int, override_models=None, overri
     t = threading.Thread(target=_run_task_worker_ka, args=(task_id, account_id, brand, keywords, platforms), daemon=True)
     t.start()
     return {"taskId": task_id, "status": "RUNNING", "total": total, "completed": 0}
+
+
+def _ka_result_is_success(task: dict) -> bool:
+    """判断 KA 返回结果是否包含可用答案。"""
+    status = task.get("status", "")
+    result_obj = task.get("result") or {}
+    text = result_obj.get("text", "") or ""
+    screenshot_url = task.get("screenshotUrl", "") or result_obj.get("remotePath", "") or ""
+    return (status in SCREENSHOT_SUCCESS_STATUSES and bool(text.strip())) or (
+        status == "COMPLETED" and not text.strip() and bool(screenshot_url.strip())
+    )
+
+
+def _auto_retry_failed_results(task_id: str, account_id: int, search_date: str) -> None:
+    """对终态失败结果做有限次数重试，成功后回写原结果行。"""
+    pending = db.get_failed_search_results(task_id) or []
+    if not pending:
+        return
+
+    logger.info("[Ka-Auto-Retry] 任务 %s 发现 %d 条失败，最多自动重试 %d 轮",
+                task_id, len(pending), AUTO_RETRY_MAX_ROUNDS)
+
+    for round_no in range(1, AUTO_RETRY_MAX_ROUNDS + 1):
+        if not pending:
+            break
+
+        payload = [{
+            "keyword": r.get("intent_prompt") or r.get("keyword", ""),
+            "platform": r.get("platform", ""),
+            "language": "en",
+        } for r in pending]
+        try:
+            submitted = submit_ka_tasks(payload)
+            local_ids = [r.get("localTaskId") for r in submitted if r.get("localTaskId")]
+            result_map = {}
+            if local_ids:
+                results = poll_ka_until_complete(
+                    local_ids,
+                    interval=FINAL_PENDING_POLL_INTERVAL,
+                    max_wait=AUTO_RETRY_POLL_MAX_WAIT,
+                )
+                result_map = {r.get("localTaskId"): r for r in results if r.get("localTaskId")}
+        except Exception as exc:
+            logger.warning("[Ka-Auto-Retry] 第%d轮提交/轮询异常: %s", round_no, exc)
+            result_map = {}
+            submitted = []
+
+        next_pending = []
+        for index, record in enumerate(pending):
+            submitted_item = submitted[index] if index < len(submitted) else {}
+            local_id = submitted_item.get("localTaskId")
+            ka_result = result_map.get(local_id, {
+                "localTaskId": local_id,
+                "status": "FAILED",
+                "errorMessage": "自动重试未收到KA结果",
+            })
+            result_obj = ka_result.get("result") or {}
+            text = result_obj.get("text", "") or ""
+            screenshot_url = ka_result.get("screenshotUrl", "") or result_obj.get("remotePath", "") or ""
+            success = _ka_result_is_success(ka_result)
+            status = ka_result.get("status", "FAILED")
+            error_msg = (ka_result.get("errorMessage", "") or "").strip()
+            if not success and not error_msg:
+                error_msg = f"KA返回状态: {status or '未知'}"
+
+            try:
+                db.update_search_result(record["id"], {
+                    "success": 1 if success else 0,
+                    "response_json": json.dumps(ka_result, ensure_ascii=False)[:5000],
+                    "answer_text": text,
+                    "screenshot_url": screenshot_url,
+                    "error_message": "" if success else error_msg[:500],
+                    "attempt": (record.get("attempt") or 1) + round_no,
+                    "search_date": search_date,
+                })
+            except Exception as exc:
+                logger.error("[Ka-Auto-Retry] 回写结果失败 id=%s: %s", record.get("id"), exc)
+
+            if not success and round_no < AUTO_RETRY_MAX_ROUNDS:
+                next_pending.append(record)
+            db.touch_search_task_heartbeat(task_id)
+
+        pending = next_pending
+        logger.info("[Ka-Auto-Retry] 任务 %s 第%d轮完成，仍失败 %d 条",
+                    task_id, round_no, len(pending))
+
+    if pending:
+        logger.warning("[Ka-Auto-Retry] 任务 %s 达到最大重试次数，仍失败 %d 条",
+                       task_id, len(pending))
 
 
 def _run_task_worker_ka(task_id, account_id, brand, keywords, platforms):
@@ -726,8 +1095,10 @@ def _run_task_worker_ka(task_id, account_id, brand, keywords, platforms):
         submit_complete[0] = True
         logger.info("[Ka] 主线程: 所有任务已提交 (%d条)，等待轮询线程完成...", len(all_submitted))
         
-        # 等待轮询线程完成（最多等待 POLL_MAX_WAIT 秒）
-        poll_thread.join(timeout=POLL_MAX_WAIT)
+        # 等待轮询线程完成（动态超时：根据任务数量计算）
+        _dynamic_poll_wait = _calc_dynamic_timeout(len(tasks_to_submit), 1800, 3, 14400)
+        logger.info("[Ka] 主线程: 等待轮询线程完成，超时 %ds (任务数=%d)", _dynamic_poll_wait, len(tasks_to_submit))
+        poll_thread.join(timeout=_dynamic_poll_wait)
         
         # 检查是否有异常
         if poll_error[0]:
@@ -746,10 +1117,10 @@ def _run_task_worker_ka(task_id, account_id, brand, keywords, platforms):
                     tid = r.get("localTaskId")
                     if not tid:
                         continue
+                    # 只处理尚未保存的任务（避免与轮询线程重复保存）
                     with result_lock:
                         if tid in saved_results:
                             continue
-                        saved_results.append(tid)
                     
                     info = submit_idx.get(tid, {})
                     keyword = info.get("keyword", "")
@@ -771,6 +1142,8 @@ def _run_task_worker_ka(task_id, account_id, brand, keywords, platforms):
                     
                     # 只保存非QUEUED/非RENDERING状态的结果（这些状态的需要继续等待）
                     if status not in ("QUEUED", "RENDERING"):
+                        with result_lock:
+                            saved_results.append(tid)
                         db.save_search_result({
                             "task_id": task_id, "account_id": account_id, "keyword_id": kw_entry.get("id"),
                             "platform": platform, "model": PLATFORM_MODEL_MAP.get(platform, platform),
@@ -785,51 +1158,117 @@ def _run_task_worker_ka(task_id, account_id, brand, keywords, platforms):
                         })
                 
                 # 检查是否还有QUEUED或RENDERING状态的任务，如果有则继续等待
+                # 注意：跳过已保存的任务（轮询线程可能已经保存了RENDERING+有text的结果）
                 pending_ids = []
                 for r in final_results:
                     tid = r.get("localTaskId")
                     if tid and r.get("status") in ("QUEUED", "RENDERING"):
-                        pending_ids.append(tid)
+                        with result_lock:
+                            if tid not in saved_results:
+                                pending_ids.append(tid)
+
+                # KA响应中完全缺失的任务（已提交但无任何返回）也纳入等待+重新推送流程
+                _responded_ids = {r.get("localTaskId") for r in final_results if r.get("localTaskId")}
+                _missing_ids = []
+                for _mtid in valid_ids:
+                    if _mtid not in _responded_ids:
+                        with result_lock:
+                            if _mtid not in saved_results and _mtid not in pending_ids:
+                                _missing_ids.append(_mtid)
+                if _missing_ids:
+                    logger.warning("[Ka] %d 个任务在KA响应中缺失，纳入重新推送检查", len(_missing_ids))
+                    pending_ids.extend(_missing_ids)
                 
                 if pending_ids:
-                    logger.warning("[Ka] 发现 %d 个任务仍处于 QUEUED/RENDERING 状态，继续等待...", len(pending_ids))
-                for r in final_results:
-                    tid = r.get("localTaskId")
-                    if tid and r.get("status") in ("QUEUED", "RENDERING"):
-                        pending_ids.append(tid)
-                
-                if pending_ids:
-                    logger.warning("[Ka] 发现 %d 个任务仍处于 QUEUED/RENDERING 状态，继续等待...", len(pending_ids))
-                    # 继续轮询QUEUED/RENDERING的任务（使用配置的超时时间）
-                    _wait_start = time.time()
-                    _max_pending_wait = FINAL_PENDING_MAX_WAIT  # 使用配置值
+                    # 动态计算最终等待超时：根据任务数量
+                    _max_pending_wait = _calc_dynamic_timeout(len(tasks_to_submit), 900, 2, 7200)
                     _pending_poll_interval = FINAL_PENDING_POLL_INTERVAL  # 使用配置值
+                    logger.warning("[Ka] 发现 %d 个任务仍处于 QUEUED/RENDERING/缺失 状态，继续等待 %ds...", len(pending_ids), _max_pending_wait)
+                    # 继续轮询QUEUED/RENDERING的任务
+                    _wait_start = time.time()
+                    # 重新提交追踪：localTaskId -> 已重提交次数
+                    _resubmit_counts = {}
                     while pending_ids and (time.time() - _wait_start) < _max_pending_wait:
                         time.sleep(_pending_poll_interval)
+                        # ✅ 更新心跳，防止前端显示"已超时"（心跳阈值仅180秒）
+                        db.touch_search_task_heartbeat(task_id)
+                        # 更新进度显示
+                        with result_lock:
+                            _done_now = len(saved_results)
+                        db.update_search_task_progress(task_id, _done_now, f"等待KA API完成 {_done_now}/{len(tasks_to_submit)}")
                         try:
                             _pending_results = query_ka_detail(pending_ids)
-                            _still_pending = []
+                            _pending_by_id = {}
                             for qr in _pending_results:
-                                _qtid = qr.get("localTaskId")
-                                if not _qtid:
+                                _qr_tid = qr.get("localTaskId")
+                                if _qr_tid:
+                                    _pending_by_id[_qr_tid] = qr
+                            _still_pending = []
+                            for _qtid in pending_ids:
+                                qr = _pending_by_id.get(_qtid)
+                                _qinfo = submit_idx.get(_qtid, {})
+                                _qkeyword = _qinfo.get("keyword", "")
+                                _qplatform = _qinfo.get("platform", "")
+                                _q_submit_time = _qinfo.get("submit_time", 0)
+                                
+                                if qr is None:
+                                    # KA响应中缺失此任务：超过阈值且未超过重提交次数则重新提交
+                                    if _q_submit_time and (time.time() - _q_submit_time) >= RESUBMIT_THRESHOLD_SECONDS:
+                                        _round = _resubmit_counts.get(_qtid, 0)
+                                        if _round < RESUBMIT_MAX_ROUNDS:
+                                            try:
+                                                _new_results = submit_ka_tasks([{"keyword": _qkeyword, "platform": _qplatform, "language": "en"}])
+                                                _new_id = (_new_results[0].get("localTaskId") if _new_results else None)
+                                                if _new_id:
+                                                    _resubmit_counts[_qtid] = _round + 1
+                                                    submit_idx[_new_id] = {"keyword": _qkeyword, "platform": _qplatform, "submit_time": time.time()}
+                                                    with id_lock:
+                                                        submitted_ids.append(_new_id)
+                                                    _still_pending.append(_new_id)
+                                                    logger.warning("[Ka] 任务 %s 在KA响应中缺失(提交于%.0fs前)，已重新提交(第%d次) -> 新ID %s [%s/%s]", 
+                                                                   _qtid, time.time() - _q_submit_time, _round + 1, _new_id, _qplatform, _qkeyword[:30])
+                                                    continue
+                                            except Exception as _re:
+                                                logger.error("[Ka] 重新提交任务 %s 失败: %s", _qtid, _re)
+                                    _still_pending.append(_qtid)
                                     continue
+                                
                                 _qstatus = qr.get("status", "")
                                 _qresult_obj = qr.get("result") or {}
                                 _qtext = _qresult_obj.get("text", "") or ""
                                 _qscreenshot_url = qr.get("screenshotUrl", "") or _qresult_obj.get("remotePath", "") or ""
                                 _qerror_msg = (qr.get("errorMessage", "") or "")
                                 
-                                _qinfo = submit_idx.get(_qtid, {})
-                                _qkeyword = _qinfo.get("keyword", "")
-                                _qplatform = _qinfo.get("platform", "")
                                 _qkw_entry = kw_map.get(_qkeyword, keywords[0])
-                                _q_submit_time = _qinfo.get("submit_time", 0)
                                 _q_actual_duration = round(time.time() - _q_submit_time, 2) if _q_submit_time else 0
                                 
                                 if _qstatus in ("QUEUED", "RENDERING"):
+                                    # 已提交超过阈值仍无结果 → 重新提交（最多 RESUBMIT_MAX_ROUNDS 次，总查询数不变）
+                                    if _q_submit_time and (time.time() - _q_submit_time) >= RESUBMIT_THRESHOLD_SECONDS:
+                                        _round = _resubmit_counts.get(_qtid, 0)
+                                        if _round < RESUBMIT_MAX_ROUNDS:
+                                            try:
+                                                _new_results = submit_ka_tasks([{"keyword": _qkeyword, "platform": _qplatform, "language": "en"}])
+                                                _new_id = (_new_results[0].get("localTaskId") if _new_results else None)
+                                                if _new_id:
+                                                    _resubmit_counts[_qtid] = _round + 1
+                                                    submit_idx[_new_id] = {"keyword": _qkeyword, "platform": _qplatform, "submit_time": time.time()}
+                                                    with id_lock:
+                                                        submitted_ids.append(_new_id)
+                                                    _still_pending.append(_new_id)
+                                                    logger.warning("[Ka] 任务 %s 超时未返回(%.0fs, %s/%s)，已重新推送(第%d次) -> 新ID %s", 
+                                                                   _qtid, time.time() - _q_submit_time, _qplatform, _qkeyword[:30], _round + 1, _new_id)
+                                                    continue
+                                                # 提交未拿到新ID，继续等原任务
+                                            except Exception as _re:
+                                                logger.error("[Ka] 重新提交任务 %s 失败: %s", _qtid, _re)
                                     _still_pending.append(_qtid)
                                 else:
-                                    # 任务已完成（成功或失败），保存结果
+                                    # 任务已完成（成功或失败），检查是否已保存过避免重复
+                                    with result_lock:
+                                        if _qtid in saved_results:
+                                            continue
+                                        saved_results.append(_qtid)
                                     _q_is_success = _qstatus in SCREENSHOT_SUCCESS_STATUSES and len(_qtext.strip()) > 0
                                     db.save_search_result({
                                         "task_id": task_id, "account_id": account_id, "keyword_id": _qkw_entry.get("id"),
@@ -839,7 +1278,7 @@ def _run_task_worker_ka(task_id, account_id, brand, keywords, platforms):
                                         "success": 1 if _q_is_success else 0,
                                         "response_json": json.dumps(qr, ensure_ascii=False)[:5000],
                                         "answer_text": _qtext, "answer_html": "", "screenshot_url": _qscreenshot_url,
-                                        "duration": _q_actual_duration, "attempt": 1, 
+                                        "duration": _q_actual_duration, "attempt": 1 + _resubmit_counts.get(_qtid, 0), 
                                         "error_message": _qerror_msg[:500] if _qerror_msg else "",
                                         "rescue_round": "initial", "search_date": search_date,
                                     })
@@ -857,6 +1296,10 @@ def _run_task_worker_ka(task_id, account_id, brand, keywords, platforms):
                     if pending_ids:
                         logger.warning("[Ka] %d 个任务等待超时，标记为失败", len(pending_ids))
                         for _qtid in pending_ids:
+                            with result_lock:
+                                if _qtid in saved_results:
+                                    continue
+                                saved_results.append(_qtid)
                             _qinfo = submit_idx.get(_qtid, {})
                             _qkeyword = _qinfo.get("keyword", "")
                             _qplatform = _qinfo.get("platform", "")
@@ -890,10 +1333,12 @@ def _run_task_worker_ka(task_id, account_id, brand, keywords, platforms):
                         rendering_tasks.append(tid)
                 
                 if rendering_tasks:
-                    logger.info("[Ka] 启动截图补全线程，%d 条任务需要补全截图...", len(rendering_tasks))
+                    # 动态计算截图补全超时：根据需要补全的任务数量
+                    _screenshot_wait = _calc_dynamic_timeout(len(rendering_tasks), 1200, 5, 7200)
+                    logger.info("[Ka] 启动截图补全线程，%d 条任务需要补全截图，超时 %ds...", len(rendering_tasks), _screenshot_wait)
                     screenshot_thread = threading.Thread(
                         target=_complete_screenshots,
-                        args=(task_id, rendering_tasks, submit_idx, kw_map, keywords, account_id, search_date),
+                        args=(task_id, rendering_tasks, submit_idx, kw_map, keywords, account_id, search_date, _screenshot_wait),
                         daemon=True
                     )
                     screenshot_thread.start()
@@ -915,6 +1360,8 @@ def _run_task_worker_ka(task_id, account_id, brand, keywords, platforms):
                     "rescue_round": "initial", "search_date": search_date,
                 })
         
+        # 初次轮询完成后，对终态失败结果做有限次数自动重试。
+        _auto_retry_failed_results(task_id, account_id, search_date)
         db.update_search_task_status(task_id, "COMPLETED")
         with result_lock:
             saved_count = len(saved_results)
